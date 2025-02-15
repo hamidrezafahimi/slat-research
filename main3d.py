@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
-from VisualDepthGeom import VisualDepthGeometry3D
-from utils import set_axes_equal
+from VisualDepthGeometry3D import VisualDepthGeometry3D
+from lib.utils import set_axes_equal
 
 cam_point = (0, 0, 9.4)
 
@@ -11,7 +11,7 @@ vdg3d = VisualDepthGeometry3D(cam_point=cam_point,
                               cam_angle=-0.783653,
                               img_downscale_factor = 0.0625)
 
-vdg3d.registerData('00000004.png')
+vdg3d.registerData('depthpro_output.png')
 
 corrected_tcdps_irn, rdps, geps = vdg3d.estimateRealPoints()
 

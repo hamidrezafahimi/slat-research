@@ -4,6 +4,18 @@ import time
 
 import math
 
+def scale_d(d, f):
+    d_max = np.max(d)
+    # Ensure all values of d are above f
+    scaled_d = np.copy(d).astype(float)  # Use float for scaling calculations
+    min_f_d = np.maximum(f, np.min(d))
+    
+    # Rescale the values while keeping d_max the same
+    scaled_d = (scaled_d - np.min(d)) / (d_max - np.min(d)) * (d_max - min_f_d) + min_f_d
+    scaled_d = np.clip(scaled_d, 0, 255)  # Ensure values stay in [0, 255]
+    return scaled_d#.astype(np.uint8)
+
+
 def calc_gep(angle, y_value, center=(0, 0)):
     """
     Calculate the intersection points of radial lines with a horizontal line (y = y_value).
@@ -111,8 +123,8 @@ def perform_tilt_correction_2d(start, raw_depth_points, gep_dists):
     tilt_corrected_depth_points = []
     for rdp, gepd in zip(raw_depth_points, gep_dists):
         print(rdp)
-        data = list(np.array(rdp) + (max_gep_dist - gepd)*(get_unit_vec(np.array(rdp)-start)))
-        # print(get_unit_vec(np.array(rdp)-start), np.array(rdp), start)
+        data = list(np.array(rdp) + (max_gep_dist - gepd)*(get_unit_vec_of_vec(np.array(rdp)-start)))
+        # print(get_unit_vec_of_vec(np.array(rdp)-start), np.array(rdp), start)
         tilt_corrected_depth_points.append(data)
     return tilt_corrected_depth_points
 
@@ -265,7 +277,7 @@ def get_relative_midpoint(start, end, ratio):
     return (start[0] + ratio * (end[0] - start[0]), start[1] + ratio * (end[1] - start[1]))
 
 def get_absolute_midpoint(start, end, dist):
-    return np.array(start) + dist * get_unit_vec(np.array(end) - np.array(start))
+    return np.array(start) + dist * get_unit_vec_of_vec(np.array(end) - np.array(start))
 
 def remove_derivative_and_integrate_1d(xs, set1, set2):
     d1 = calc_derivative(xs, set1, ret_array=True)
@@ -299,7 +311,7 @@ def perform_tilt_correction_3d(start, raw_depth_points, max_gep_dist, gep_dists)
     for i in range(raw_depth_points.shape[0]):
         for j in range(raw_depth_points.shape[1]):
             tilt_corrected_depth_points[i,j,:] = raw_depth_points[i,j,:] + \
-                (max_gep_dist - gep_dists[i,j]) * (get_unit_vec(raw_depth_points[i,j,:]-start))
+                (max_gep_dist - gep_dists[i,j]) * (get_unit_vec_of_vec(raw_depth_points[i,j,:]-start))
     return tilt_corrected_depth_points
 
 def remove_derivative_and_integrate_2d(xs, set1, set2):

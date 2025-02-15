@@ -3,16 +3,14 @@ import os
 import numpy as np
 import csv
 import time
-from lines import calcFlatGroundDepth, expand_segments
 from sampl3d import scale_d_surface
+import sys
+sys.path.append("/media/hamid/Workspace/thing/lib")
+from lines import calcFlatGroundDepth, expand_segments
 
 # List to store all rows of pixel data
-# m_pixel_data = []
-# h_pixel_data = []
-# r_pixel_data = []
-# f_pixel_data = []
 output_txt_file = "output_file_paths.txt"  # Path to save the filenames
-tilt_file = "/home/hamid/viot3/pm1states/camera_states.txt"
+tilt_file = "/media/hamid/Workspace/viot3/pm1states/camera_states.txt"
 
 with open(tilt_file, "r") as file:
     # Read all lines
@@ -21,8 +19,8 @@ with open(tilt_file, "r") as file:
 
 
 # Directories containing images
-directory1 = '/home/hamid/viot3/output/put'
-directory2 = '/home/hamid/viot3/sam/masks'
+directory1 = '/media/hamid/Workspace/viot3/output/put'
+directory2 = '/media/hamid/Workspace/viot3/sam/masks'
 
 # Function to extract the numeric part of filenames for sorting
 def extract_number(filename):
@@ -76,7 +74,6 @@ with open(m_csv, "a") as m_file, open(h_csv, "a") as h_file, open(r_csv, "a") as
             residual = h - gep_depth
             # hddot = compute_second_derivative(h)
             # Compute the Laplacian (2nd derivative)
-            # ddepth = cv2.CV_64F ensures we avoid data truncation
             res_lap = cv2.Laplacian(residual, ddepth=cv2.CV_64F, ksize=3)
             depth_lap = cv2.Laplacian(depth, ddepth=cv2.CV_64F, ksize=3)
             # Optionally normalize for visualization
@@ -92,6 +89,7 @@ with open(m_csv, "a") as m_file, open(h_csv, "a") as h_file, open(r_csv, "a") as
             # print(np.int32(thresh1[:, 32] > 0))
             # print(thresh1[:, 32] )
             
+            # cv2.imshow("f", gep_depth)
             # cv2.imshow("d", depth)
             # cv2.imshow("res", residual)
             # cv2.imshow("ddd", depth_lap)
@@ -99,39 +97,14 @@ with open(m_csv, "a") as m_file, open(h_csv, "a") as h_file, open(r_csv, "a") as
             # cv2.imshow("expanded mask", e_mask)
             # cv2.waitKey()
             # time.sleep(100)
-            # Flatten the image to a 1D array (each row of the image becomes a single row in the CSV)
-            # flattened_image = image.flatten()
-            
-            # image[:, column_index]
-            # Append this flattened image data as a row
-            for c in range(depth.shape[1]):
-                # h_data = scale_d_surface(depth[:, c], gep_depth[:, c])
-                np.savetxt(m_file, [np.int32(thresh1[:, c] > 0)], delimiter=',', fmt='%d')
-                np.savetxt(d_file, [depth[:, c]], delimiter=',', fmt='%d')
-                np.savetxt(r_file, [residual[:, c]], delimiter=',', fmt='%d')
-                np.savetxt(f_file, [gep_depth[:, c]], delimiter=',', fmt='%d')
-                np.savetxt(h_file, [h[:, c]], delimiter=',', fmt='%d')
-                np.savetxt(ddd_file, [depth_lap[:, c]], delimiter=',', fmt='%d')
-                np.savetxt(rdd_file, [res_lap[:, c]], delimiter=',', fmt='%d')
-                file.write(f"{image1_path}, {image2_path}\n")
 
-
-# # Convert the list to a numpy array for easier saving
-# m_pixel_data = np.array(m_pixel_data)
-# h_pixel_data = np.array(h_pixel_data)
-# f_pixel_data = np.array(f_pixel_data)
-# r_pixel_data = np.array(r_pixel_data)
-
-# n_csv = 'names.csv'
-# image_data
-
-# # Save the numpy array to a CSV file
-# np.savetxt(m_csv, m_pixel_data, delimiter=',', fmt='%d')
-# print(f"m CSV file saved to: {m_csv}")
-# np.savetxt(h_csv, h_pixel_data, delimiter=',', fmt='%d')
-# print(f"h CSV file saved to: {h_csv}")
-# np.savetxt(r_csv, r_pixel_data, delimiter=',', fmt='%d')
-# print(f"r CSV file saved to: {r_csv}")
-# np.savetxt(f_csv, f_pixel_data, delimiter=',', fmt='%d')
-# print(f"f CSV file saved to: {f_csv}")
-# print(f"n CSV file saved to: {n_csv}")
+            # for c in range(depth.shape[1]):
+            #     # h_data = scale_d_surface(depth[:, c], gep_depth[:, c])
+            #     np.savetxt(m_file, [np.int32(thresh1[:, c] > 0)], delimiter=',', fmt='%d')
+            #     np.savetxt(d_file, [depth[:, c]], delimiter=',', fmt='%d')
+            #     np.savetxt(r_file, [residual[:, c]], delimiter=',', fmt='%d')
+            #     np.savetxt(f_file, [gep_depth[:, c]], delimiter=',', fmt='%d')
+            #     np.savetxt(h_file, [h[:, c]], delimiter=',', fmt='%d')
+            #     np.savetxt(ddd_file, [depth_lap[:, c]], delimiter=',', fmt='%d')
+            #     np.savetxt(rdd_file, [res_lap[:, c]], delimiter=',', fmt='%d')
+            #     file.write(f"{image1_path}, {image2_path}\n")

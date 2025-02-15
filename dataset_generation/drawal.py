@@ -27,7 +27,7 @@ with open(output_txt_file, "r") as file:
 while True:
     # Randomly select a row index
     # random_row_index = np.random.randint(0, rmat.shape[0])
-    random_row_index = 44614
+    random_row_index = 19196
 
     # Extract the selected row from rmat and mmat
     dmat_row = dmat.iloc[random_row_index]
@@ -73,15 +73,18 @@ while True:
         # plt.plot(i, r_val, color=colorr)
         # plt.plot(i, f_val, color='black')
         if i > 0:
-            colord = 'red' if m_val == 1 else 'blue'
-            colorr = 'yellow' if m_val == 1 else 'green'
-            colorh = 'brown' if m_val == 1 else 'grey'
-            plt.plot([i-1, i], [last_h, h_val], color=colorh)
-            plt.plot([i-1, i], [last_d, d_val], color=colord)
-            plt.plot([i-1, i], [last_r, r_val], color=colorr)
-            plt.plot([i-1, i], [last_f, f_val], color='black')
-            plt.plot([i-1, i], [last_ddd, ddd_val], color='cyan')
-            plt.plot([i-1, i], [last_rdd, rdd_val], color='pink')
+            colord = 'blue' if m_val == 1 else 'red'
+            colorr = 'green' if m_val == 1 else 'red'
+            # colorh = 'grey' if m_val == 1 else 'grey'
+            # colord = 'blue' if m_val == 1 else 'red'
+            # colorr = 'green' if m_val == 1 else 'red'
+            colorh = 'grey' if m_val == 1 else 'red'
+            plt.plot([i-1, i], [last_h, h_val], color=colorh, label='H(x)')
+            plt.plot([i-1, i], [last_d, d_val], color=colord, label='D(x)')
+            plt.plot([i-1, i], [last_r, r_val], color=colorr, label='R(x)')
+            plt.plot([i-1, i], [last_f, f_val], color='black', label='F(x)')
+            # plt.plot([i-1, i], [last_ddd, ddd_val], color='cyan')
+            # plt.plot([i-1, i], [last_rdd, rdd_val], color='pink')
         last_d = d_val
         last_r = r_val
         last_f = f_val
@@ -91,9 +94,12 @@ while True:
         # plt.scatter(i, f_val, color='black')
 
     # Label the axes and add a title
-    plt.xlabel('Index (Column Number)')
-    plt.ylabel('Value (rmat)')
-    plt.title(f'Scattered Plot for Random Row {random_row_index}')
+    plt.xlabel('Index (Row Number)')
+    plt.ylabel('Value')
+    plt.title(f'Normalized Proximity to Camera (data: {random_row_index})')
+    handles, labels = plt.gca().get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    # plt.legend(by_label.values(), by_label.keys())
     plt.grid(True, linestyle='--', alpha=0.6)
 
     # Show the plot

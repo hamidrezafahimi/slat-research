@@ -99,12 +99,16 @@ def calcFlatGroundDepth(tilt_angle, h=10, vertical_fov_degrees=0.75*66.0, horizo
     # Create a 2D array to store depth values
     depth_data = np.zeros((height, width))
     # Calculate depth for each pixel
+    projectionYs = np.zeros((height, width))
+    projectionXs = np.zeros((height, width))
     for i, v_angle in enumerate(vertical_angles):
         for j, h_angle in enumerate(horizontal_angles):
             if -np.pi / 2 <= v_angle <= 0:  # Ensure valid vertical angles
                 r = h / abs(np.sin(v_angle))  # Length in vertical plane
                 R = r / abs(np.cos(h_angle))  # Adjust for horizontal angle
                 depth_data[i, j] = R
+                # point = R * np.array([])
+                # projectionXs[i, j] = 
             # else:
             #     depth_data[i, j] = np.inf  # Invalid pixels set to infinity
 
