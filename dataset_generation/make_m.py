@@ -19,8 +19,8 @@ with open(tilt_file, "r") as file:
 
 
 # Directories containing images
-directory1 = '/media/hamid/Workspace/viot3/output/put'
-directory2 = '/media/hamid/Workspace/viot3/sam/masks'
+directory1 = '/media/hamid/Workspace/viot3/data1005/depth'
+directory2 = '/media/hamid/Workspace/viot3/data1005/full'
 
 # Function to extract the numeric part of filenames for sorting
 def extract_number(filename):
@@ -89,7 +89,10 @@ with open(m_csv, "a") as m_file, open(h_csv, "a") as h_file, open(r_csv, "a") as
             # print(np.int32(thresh1[:, 32] > 0))
             # print(thresh1[:, 32] )
             
+            numstr = image1_path[-12:-4]
+            pat_pth = image1_path[:-12]+'pattern_'+numstr+'.jpg'
             # cv2.imshow("f", gep_depth)
+            cv2.imwrite(pat_pth, gep_depth)
             # cv2.imshow("d", depth)
             # cv2.imshow("res", residual)
             # cv2.imshow("ddd", depth_lap)
