@@ -5,3 +5,5 @@ output/
 *.csv
 *.txt
 *#
+data/
+*.jpeg
