@@ -7,7 +7,7 @@ from scipy.optimize import curve_fit
 
 # Tunable parameters.
 VAR_THRESHOLD = 5.0    # Variance below this is acceptable.
-HUGE_METRIC = 1e7      # Value to assign if skip condition is met.
+HUGE_METRIC = 1e9      # Value to assign if skip condition is met.
 
 def compute_threshold_pattern(image_shape, bottom_threshold, slope):
     """
@@ -30,14 +30,9 @@ def apply_threshold(image, threshold_pattern):
     binary_output = (image > threshold_pattern).astype(np.uint8) * 255
     return binary_output
 
-def compute_metrics(masked_img, template_mask):
+def compute_metric(masked_img, template_mask):
     """
-    Computes five metrics for the masked image:
-      - var_metric: MSE from fitting a 2D polynomial to unmasked pixels (pixel > 5).
-      - grad_metric: Average gradient magnitude over unmasked pixels.
-      - area_metric: 1 - (unmasked_pixels / total_pixels) so that a larger unmasked area yields a lower value.
-      - overlap_metric: 1 - (overlap ratio with template_mask).
-      - cmb_metric: Combined metric = var_metric + overlap_metric.
+    Computes five metrics for the masked image: 1 - (overlap ratio with template_mask).
       
     Skip conditions:
       If the binary mask is trivial (all 0 or all 255), if there are fewer than 6 unmasked pixels,
@@ -45,11 +40,8 @@ def compute_metrics(masked_img, template_mask):
       or if the overlap with the template mask is less than 50% (i.e. overlap_ratio < 0.5),
       then all metrics are returned as HUGE_METRIC.
       
-    Returns:
-      (cmb_metric, var_metric, area_metric, grad_metric, overlap_metric)
+    Returns: overlap_metric
     """
-
-    # template_mask = (tmask > 4)
 
     total_pixels = masked_img.size
     # # Unmasked pixels: pixels with value > 5.
@@ -57,54 +49,22 @@ def compute_metrics(masked_img, template_mask):
     unmasked_count = np.count_nonzero(mask)
     unmasked_fraction = unmasked_count / total_pixels
 
-    # Skip condition if too few unmasked pixels or unmasked fraction < 10%.
-    if unmasked_count < 6 or unmasked_fraction < 0.1:
-        print(f"Skip condition -- too few unmasked pixels ({unmasked_count}) or unmasked fraction ({unmasked_fraction}) < 10%")
-        return (HUGE_METRIC, HUGE_METRIC, HUGE_METRIC)
-    
-    # # area_metric: lower when more pixels are unmasked.
-    # area_metric = 1 - unmasked_fraction
-
-    # # Compute grad_metric: average gradient magnitude over unmasked pixels.
-    # grad_x = cv2.Sobel(masked_img, cv2.CV_64F, 1, 0, ksize=3)
-    # grad_y = cv2.Sobel(masked_img, cv2.CV_64F, 0, 1, ksize=3)
-    # grad_mag = np.sqrt(grad_x**2 + grad_y**2)
-    # grad_metric = np.mean(grad_mag[mask])
-    
-    # Fit a 2D polynomial to unmasked pixels.
-    def poly2D(coords, a, b, c, d, e, f):
-        x, y = coords
-        return a + b*x + c*y + d*x**2 + e*x*y + f*y**2
-    
-    x_coords, y_coords = np.where(template_mask)
-    z_vals_fit = template_mask[x_coords, y_coords].astype(np.float64)
-    initial_guess = np.zeros(6, dtype=np.float64)
-    try:
-        popt, _ = curve_fit(poly2D, (x_coords, y_coords), z_vals_fit, p0=initial_guess)
-    except Exception:
-        print("not able to fit")
-        return (HUGE_METRIC, HUGE_METRIC, HUGE_METRIC)
-
-    # yy, xx = np.meshgrid(np.arange(masked_img.shape[0]), np.arange(masked_img.shape[1]), indexing='ij')
-    # fitted_vals = poly2D((xx.ravel(), yy.ravel()), *popt).reshape((masked_img.shape))
-    x_coords_metric, y_coords_metric = np.where(mask)
-    fitted_vals = poly2D((x_coords_metric, y_coords_metric), *popt)
-    z_vals_metric = mask[x_coords_metric, y_coords_metric].astype(np.float64)
-    var_metric = np.mean((z_vals_metric - fitted_vals)**2)#**2 * (1 - (float(len(x_coords_metric)) / total_pixels))
-    
     # Compute overlap metric with the template mask.
     overlap_ratio = np.sum(masked_img == template_mask) / total_pixels
     overlap_metric = 1 - overlap_ratio
 
+    # Skip condition if too few unmasked pixels or unmasked fraction < 10%.
+    if unmasked_count < 6 or unmasked_fraction < 0.1:
+        # print(f"Skip condition -- too few unmasked pixels ({unmasked_count}) or unmasked fraction ({unmasked_fraction}) < 10%")
+        return HUGE_METRIC * overlap_metric
+
     # New skip condition: if overlap_ratio is less than 20% then skip then skip.
     if overlap_ratio < 0.2:
-        print(f"Skip condition -- overlap_ratio ({overlap_ratio}) is less than 20%")
-        return (HUGE_METRIC, HUGE_METRIC, HUGE_METRIC)
+        # print(f"Skip condition -- overlap_ratio ({overlap_ratio}) is less than 20%")
+        return HUGE_METRIC * overlap_metric
     
-    # Combined metric: sum of var_metric and overlap_metric.
-    cmb_metric = var_metric + overlap_metric
+    return overlap_metric
 
-    return (cmb_metric, var_metric, overlap_metric)
 
 if __name__ == "__main__":
     # Load the grayscale depth image.
@@ -132,8 +92,6 @@ if __name__ == "__main__":
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow([
             "image_name",
-            "cmb_metric",
-            "var_metric",
             "overlap_metric"
         ])
         
@@ -147,22 +105,18 @@ if __name__ == "__main__":
                 
                 # Check trivial condition: if binary_output is completely 0 or 255.
                 if np.all(binary_output == 0) or np.all(binary_output == 255):
-                    metrics = (HUGE_METRIC, HUGE_METRIC, HUGE_METRIC)
+                    metrics = HUGE_METRIC
                 else:
                     # Create masked image: keep original pixel where binary_output is 0.
                     masked_image = np.where(binary_output == 0, img, 0).astype(np.uint8)
-                    metrics = compute_metrics(masked_image, template_mask)
-                
-                (cmb_metric, var_metric, overlap_metric) = metrics
+                    overlap_metric = compute_metric(masked_image, template_mask)
                 
                 # Save the masked image only if cmb_metric is not HUGE_METRIC.
-                if cmb_metric != HUGE_METRIC:
+                if overlap_metric < 0.01 * HUGE_METRIC:
                     cv2.imwrite(os.path.join(output_dir, image_name), masked_image)
                 
                 csv_writer.writerow([
                     image_name,
-                    cmb_metric,
-                    var_metric,
                     overlap_metric
                 ])
     
