@@ -129,35 +129,120 @@ class ImagePatternDataset(Dataset):
 import torch
 import torch.nn.functional as F
 
-def smooth_threshold_loss(image, template_mask, threshold_pattern, k=10.0, lambda_tv=1.0, lambda_seg=1.0):
+def differentiable_entropy(x, num_bins=64, sigma=0.02):
     """
-    image: the original depth image tensor [B, 1, H, W]
-    template_mask: the target template mask tensor [B, 1, H, W]
-    threshold_pattern: the network's output threshold pattern [B, 1, H, W]
-    k: controls the steepness of the sigmoid used for soft thresholding.
-    lambda_tv: weight for the Total Variation (TV) loss; increased to strongly enforce smoothness.
-    lambda_seg: weight for the segmentation loss (comparing the masked image to the template mask).
+    Compute a differentiable approximation to Shannon entropy.
     
+    Args:
+      x: tensor of shape [B,1,H,W] with values in [0,1].
+      num_bins: number of histogram bins.
+      sigma: controls the softness of the histogram binning.
+      
     Returns:
-        A combined loss that heavily penalizes high gradients in the threshold pattern.
+      Average normalized entropy over the batch (scalar tensor).
+    """
+    B, C, H, W = x.shape
+    N = H * W
+    x_flat = x.view(B, N)  # shape: [B, N]
+    # Create bin centers between 0 and 1.
+    bin_centers = torch.linspace(0, 1, num_bins, device=x.device, dtype=x.dtype).view(1, num_bins)
+    # Compute soft assignments: for each pixel, weight for each bin.
+    x_expanded = x_flat.unsqueeze(2)  # shape: [B, N, 1]
+    bin_centers_expanded = bin_centers.unsqueeze(1)  # shape: [B, 1, num_bins]
+    weights = torch.exp(-((x_expanded - bin_centers_expanded)**2) / (2 * sigma**2))  # [B, N, num_bins]
+    # Sum over pixels to get a soft histogram.
+    hist = weights.sum(dim=1)  # [B, num_bins]
+    hist = hist / (hist.sum(dim=1, keepdim=True) + 1e-8)
+    # Compute entropy: H = - sum(p * log(p)).
+    entropy = - (hist * torch.log(hist + 1e-8)).sum(dim=1)  # [B]
+    # Normalize entropy by log(num_bins) so that maximum entropy is 1.
+    normalized_entropy = entropy / torch.log(torch.tensor(num_bins, device=x.device, dtype=x.dtype))
+    return normalized_entropy.mean()
+
+def compute_smoothness_loss(threshold_pattern, max_tv=10000, max_lap_var=0.02, num_bins=64, sigma=0.02):
+    """
+    Compute a smoothness loss from several differentiable metrics on the threshold pattern.
+    
+    Args:
+      threshold_pattern: [B,1,H,W] network output (assumed to be in [0,1]).
+      max_tv: maximum total variation (for normalization).
+      max_lap_var: maximum Laplacian variance (for normalization).
+      num_bins: number of bins for differentiable entropy.
+      sigma: bandwidth for the soft histogram.
+      
+    Returns:
+      A scalar tensor representing the smoothness loss (higher means more edge-rich/complex).
+    """
+    # Normalize threshold_pattern to [0,1] (should be nearly so, but for stability)
+    tp_min = threshold_pattern.amin(dim=[1,2,3], keepdim=True)
+    tp_max = threshold_pattern.amax(dim=[1,2,3], keepdim=True)
+    norm_tp = (threshold_pattern - tp_min) / (tp_max - tp_min + 1e-8)
+    
+    # 1. Sobel Edge Score.
+    sobel_kernel_x = torch.tensor([[1, 0, -1],
+                                   [2, 0, -2],
+                                   [1, 0, -1]], dtype=norm_tp.dtype, device=norm_tp.device).view(1, 1, 3, 3)
+    sobel_kernel_y = torch.tensor([[1, 2, 1],
+                                   [0, 0, 0],
+                                   [-1, -2, -1]], dtype=norm_tp.dtype, device=norm_tp.device).view(1, 1, 3, 3)
+    grad_x = F.conv2d(norm_tp, sobel_kernel_x, padding=1)
+    grad_y = F.conv2d(norm_tp, sobel_kernel_y, padding=1)
+    edge_magnitude = torch.sqrt(grad_x**2 + grad_y**2 + 1e-8)
+    edge_mean = edge_magnitude.mean(dim=[1,2,3])
+    # Normalize: maximum edge strength approximated by 1.41 (L2 norm of [1,2,1]).
+    edge_score = torch.clamp(edge_mean / 1.41, 0, 1)
+    
+    # 2. Laplacian Variance Score.
+    laplacian_kernel = torch.tensor([[0, 1, 0],
+                                     [1, -4, 1],
+                                     [0, 1, 0]], dtype=norm_tp.dtype, device=norm_tp.device).view(1, 1, 3, 3)
+    lap = F.conv2d(norm_tp, laplacian_kernel, padding=1)
+    lap_var = lap.var(dim=[1,2,3])
+    lap_score = torch.clamp(torch.log1p(lap_var) / torch.log1p(torch.tensor(max_lap_var, device=norm_tp.device, dtype=norm_tp.dtype)), 0, 1)
+    
+    # 3. Entropy Score.
+    ent = differentiable_entropy(norm_tp, num_bins=num_bins, sigma=sigma)
+    entropy_score = torch.clamp(ent / 8.0, 0, 1)
+    
+    # 4. Total Variation Score.
+    tv_h = torch.abs(norm_tp[:, :, 1:, :] - norm_tp[:, :, :-1, :]).sum(dim=[1,2,3])
+    tv_v = torch.abs(norm_tp[:, :, :, 1:] - norm_tp[:, :, :, :-1]).sum(dim=[1,2,3])
+    tv = tv_h + tv_v
+    tv_score = torch.clamp(torch.log1p(tv) / torch.log1p(torch.tensor(max_tv, device=norm_tp.device, dtype=norm_tp.dtype)), 0, 1)
+    
+    combined_loss = (edge_score + lap_score + entropy_score + tv_score) / 4.0
+    return combined_loss.mean()
+
+def final_loss(image, template_mask, threshold_pattern, 
+               k=10.0, lambda_seg=1.0, lambda_smooth=1.0,
+               max_tv=10000, max_lap_var=0.02, num_bins=64, sigma=0.02):
+    """
+    Final loss function for training.
+    
+    Args:
+      image: [B,1,H,W] original depth image.
+      template_mask: [B,1,H,W] template mask.
+      threshold_pattern: [B,1,H,W] network output (should be in [0,1]).
+      k: steepness factor for soft thresholding.
+      lambda_seg: weight for the segmentation loss (soft-threshold masked image vs. template mask).
+      lambda_smooth: weight for the smoothness loss (edge, Laplacian, entropy, TV).
+      lambda_bin: weight for the binary penalty (prevent threshold values from nearing 0 or 1).
+      margin: threshold margin below which (or above 1-margin) values are penalized.
+      max_tv, max_lap_var, num_bins, sigma: parameters for smoothness loss normalization.
+      
+    Returns:
+      A scalar tensor: the final loss.
     """
     # Compute a differentiable soft mask.
-    # When image < threshold_pattern, (image - threshold_pattern) is negative, 
-    # so sigmoid(k*(...)) is near 0 and 1 - sigmoid is near 1.
-    # When image > threshold_pattern, the mask goes to 0.
     mask = 1 - torch.sigmoid(k * (image - threshold_pattern))
     masked_image = image * mask
-
-    # Segmentation loss: encourage some alignment with the template mask.
     seg_loss = F.l1_loss(masked_image, template_mask)
+    
+    # Compute the smoothness loss on the threshold pattern.
+    smooth_loss = compute_smoothness_loss(threshold_pattern, max_tv=max_tv, max_lap_var=max_lap_var, num_bins=num_bins, sigma=sigma)
 
-    # Total Variation (TV) loss: penalizes large differences between neighboring pixels.
-    tv_h = torch.mean(torch.abs(threshold_pattern[:, :, :, :-1] - threshold_pattern[:, :, :, 1:]))
-    tv_v = torch.mean(torch.abs(threshold_pattern[:, :, :-1, :] - threshold_pattern[:, :, 1:, :]))
-    tv_loss = tv_h + tv_v
-
-    # Combined loss: here the TV term dominates.
-    return lambda_seg * seg_loss + lambda_tv * tv_loss
+    total_loss = lambda_seg * seg_loss + lambda_smooth * smooth_loss
+    return total_loss
 
 # -------------------------
 # Training Function
@@ -190,7 +275,7 @@ def train_model(model, dataloader, epochs=10, lr=1e-4, device='cuda', checkpoint
             optimizer.zero_grad()
             # Forward pass: produce threshold pattern from depth image.
             th_pattern = model(x_batch)
-            loss_value = segmentation_loss(x_batch, template_mask, th_pattern)
+            loss_value = final_loss(x_batch, template_mask, th_pattern)
             loss_value.backward()
             optimizer.step()
 
@@ -291,32 +376,3 @@ def evaluate_model(model_checkpoint_path, input_image_path, template_mask_path, 
     print(f"Saved threshold pattern to {threshold_pattern_path}")
     print(f"Saved template mask to {template_mask_path_out}")
 
-# -------------------------
-# Run Script Example
-# -------------------------
-if __name__ == '__main__':
-    # Update these paths as needed
-    depth_images_dir = '/path/to/depth_images'
-    template_masks_dir = '/path/to/template_masks'
-    checkpoints_dir = './checkpoints'
-    
-    # Optionally add normalization or other transforms.
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        # e.g., transforms.Normalize(mean, std)
-    ])
-    
-    # Create model and dataloader for training
-    model, dataloader = create_model(depth_images_dir, template_masks_dir, batch_size=4, transform=transform)
-    
-    # Train the model (update hyperparameters as needed)
-    train_model(model, dataloader, epochs=20, lr=1e-4, device='cuda', checkpoint_interval=5, checkpoint_dir=checkpoints_dir)
-    
-    # Evaluate the model on a single image (update file paths)
-    model_checkpoint = os.path.join(checkpoints_dir, "checkpoint_epoch_20.pth")
-    input_image_file = '/path/to/depth_images/sample.jpg'
-    template_mask_file = '/path/to/template_masks/sample.jpg'
-    output_directory = './evaluation_output'
-    
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    evaluate_model(model_checkpoint, input_image_file, template_mask_file, output_directory, device=device)
