@@ -1,126 +1,161 @@
 import torch
 import torch.nn as nn
 
-class EncoderDecoder(nn.Module):
-    """
-    Encoder-decoder network for unsupervised segmentation.
-    Expects two inputs (image and pattern), concatenated along the channel axis.
-    Produces a single-channel mask.
-    """
-    def __init__(self, in_channels=2):
-        """
-        in_channels=2 means:
-          1 channel for the input image,
-          1 channel for the pattern image.
-        """
-        super(EncoderDecoder, self).__init__()
-        
-        # ----- Encoder -----
-        self.encoder = nn.Sequential(
-            nn.Conv2d(in_channels, 32, kernel_size=3, padding=1),
+class DoubleConv(nn.Module):
+    """Two consecutive convolution layers with BatchNorm and ReLU."""
+    def __init__(self, in_channels, out_channels):
+        super(DoubleConv, self).__init__()
+        self.double_conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),  # optional normalization
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-
-            # Bottleneck
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         )
-        
-        # ----- Decoder -----
-        self.decoder = nn.Sequential(
-            nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, 
-                               padding=1, output_padding=1),
-            nn.ReLU(inplace=True),
+    
+    def forward(self, x):
+        return self.double_conv(x)
 
-            nn.ConvTranspose2d(128, 64, kernel_size=3, stride=2, 
-                               padding=1, output_padding=1),
-            nn.ReLU(inplace=True),
-
-            nn.ConvTranspose2d(64, 32, kernel_size=3, stride=2, 
-                               padding=1, output_padding=1),
-            nn.ReLU(inplace=True),
-
-            nn.Conv2d(32, 1, kernel_size=1),
-            nn.Sigmoid()  # final mask in [0,1]
+class Down(nn.Module):
+    """Downscaling with maxpool then double convolution."""
+    def __init__(self, in_channels, out_channels):
+        super(Down, self).__init__()
+        self.maxpool_conv = nn.Sequential(
+            nn.MaxPool2d(2),
+            DoubleConv(in_channels, out_channels)
         )
-        
-    def forward(self, x, p):
+    
+    def forward(self, x):
+        return self.maxpool_conv(x)
+
+class Up(nn.Module):
+    """Upscaling then double convolution. Uses bilinear upsampling by default."""
+    def __init__(self, in_channels, out_channels, bilinear=True):
+        super(Up, self).__init__()
+        if bilinear:
+            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+            self.conv = DoubleConv(in_channels, out_channels)
+        else:
+            # Learnable upsampling if bilinear is not preferred.
+            self.up = nn.ConvTranspose2d(in_channels // 2, in_channels // 2, kernel_size=2, stride=2)
+            self.conv = DoubleConv(in_channels, out_channels)
+    
+    def forward(self, x1, x2):
+        x1 = self.up(x1)
+        # Adjust size (if needed) to match skip connection from encoder
+        diffY = x2.size()[2] - x1.size()[2]
+        diffX = x2.size()[3] - x1.size()[3]
+        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
+                        diffY // 2, diffY - diffY // 2])
+        # Concatenate along the channel dimension
+        x = torch.cat([x2, x1], dim=1)
+        return self.conv(x)
+
+class OutConv(nn.Module):
+    """Final 1x1 convolution to get desired number of output channels."""
+    def __init__(self, in_channels, out_channels):
+        super(OutConv, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+    
+    def forward(self, x):
+        return self.conv(x)
+
+# -------------------------
+# U-Net Architecture
+# -------------------------
+
+class UNet(nn.Module):
+    def __init__(self, n_channels=1, n_classes=1, bilinear=True):
         """
-        Forward pass.
-          x: input image, shape (B, 1, H, W)
-          p: pattern image, shape (B, 1, H, W)
-        Returns:
-          mask: shape (B, 1, H, W)
+        n_channels: number of input channels (1 for monochrome/depth image)
+        n_classes: number of output channels (1 for threshold pattern)
         """
-        # Concatenate along channel dimension => shape (B, 2, H, W)
-        inp = torch.cat((x, p), dim=1)
-        features = self.encoder(inp)
-        mask = self.decoder(features)
-        return mask
+        super(UNet, self).__init__()
+        self.n_channels = n_channels
+        self.n_classes = n_classes
+        self.bilinear = bilinear
+
+        self.inc = DoubleConv(n_channels, 64)
+        self.down1 = Down(64, 128)
+        self.down2 = Down(128, 256)
+        self.down3 = Down(256, 512)
+        factor = 2 if bilinear else 1
+        self.down4 = Down(512, 1024 // factor)
+        self.up1 = Up(1024, 512 // factor, bilinear)
+        self.up2 = Up(512, 256 // factor, bilinear)
+        self.up3 = Up(256, 128 // factor, bilinear)
+        self.up4 = Up(128, 64, bilinear)
+        self.outc = OutConv(64, n_classes)
+    
+    def forward(self, x):
+        # Encoder path
+        x1 = self.inc(x)      # [B, 64, H, W]
+        x2 = self.down1(x1)   # [B, 128, H/2, W/2]
+        x3 = self.down2(x2)   # [B, 256, H/4, W/4]
+        x4 = self.down3(x3)   # [B, 512, H/8, W/8]
+        x5 = self.down4(x4)   # [B, 1024, H/16, W/16]
+        # Decoder path with skip connections
+        x = self.up1(x5, x4)  # [B, 512, H/8, W/8]
+        x = self.up2(x, x3)   # [B, 256, H/4, W/4]
+        x = self.up3(x, x2)   # [B, 128, H/2, W/2]
+        x = self.up4(x, x1)   # [B, 64, H, W]
+        x = self.outc(x)      # [B, n_classes, H, W]
+        # Use sigmoid to constrain threshold values between 0 and 1.
+        return torch.sigmoid(x)
 
 
 import torch.nn.functional as F
 
-def segmentation_loss(x, p, m, alpha=0.01, beta=0.1, gamma=1.0):
-    """
-    x     -> input depth image (B,1,H,W)
-    p     -> pattern depth image (B,1,H,W)
-    m     -> predicted mask (B,1,H,W) with:
-               0 (black) for foreground (objects)
-               1 (white) for background (ground)
-    alpha -> weight for binary penalty
-    beta  -> weight for coverage penalty
-    gamma -> weight for edge penalty
+
+# ================================
+# Loss Function
+# ================================
+# def segmentation_loss(input_image, template_mask, threshold_pattern, alpha=0.01):
+#     """
+#     Compute segmentation loss.
     
-    The loss has four parts:
-      1) Gradient similarity loss: Encourages m to be high (background) where
-         the gradients of x and p are similar.
-      2) Edge penalty: Penalizes high m values in regions of x that exhibit strong edges.
-      3) Binary constraint: Encourages the mask to be near-binary.
-      4) Coverage loss: Prevents trivial solutions by encouraging ~50% of pixels to be background.
-    """
+#     - Create a masked image using the threshold pattern.
+#     - Use L1Loss between the masked image and template mask.
+#     - Add a binary penalty (alpha weighted) on the threshold pattern.
+#     """
+#     # Create masked image: pixels where input < threshold keep their value; else zero.
+#     masked_image = torch.where(input_image < threshold_pattern, input_image, torch.tensor(0.0, device=input_image.device))
+#     criterion = nn.L1Loss()
+#     base_loss = criterion(masked_image, template_mask)
+#     # Binary penalty to encourage threshold values to be near 0 or 1
+#     penalty = alpha * torch.mean(threshold_pattern * (1 - threshold_pattern))
+#     return base_loss + penalty
+
+
+import numpy as np
+def segmentation_loss(image, template_mask, threshold_pattern):
+    HUGE_METRIC = 1e9      # Value to assign if skip condition is met.
+    binary_output = (image > threshold_pattern).astype(np.uint8) * 255
+    # Check trivial condition: if binary_output is completely 0 or 255.
+    if np.all(binary_output == 0) or np.all(binary_output == 255):
+        return HUGE_METRIC, None
+
+    # Create masked image: keep original pixel where binary_output is 0.
+    masked_img = np.where(binary_output == 0, image, 0).astype(np.uint8)
+    total_pixels = masked_img.size
+    # # Unmasked pixels: pixels with value > 5.
+    mask = (masked_img > 4)
+    unmasked_count = np.count_nonzero(mask)
+    unmasked_fraction = unmasked_count / total_pixels
+
+    # Compute overlap metric with the template mask.
+    overlap_ratio = np.sum(masked_img == template_mask) / total_pixels
+    overlap_metric = 1 - overlap_ratio
+
+    # Skip condition if too few unmasked pixels or unmasked fraction < 10%.
+    if unmasked_count < 6 or unmasked_fraction < 0.1:
+        # print(f"Skip condition -- too few unmasked pixels ({unmasked_count}) or unmasked fraction ({unmasked_fraction}) < 10%")
+        return HUGE_METRIC * overlap_metric, None
+
+    # New skip condition: if overlap_ratio is less than 20% then skip then skip.
+    if overlap_ratio < 0.2:
+        # print(f"Skip condition -- overlap_ratio ({overlap_ratio}) is less than 20%")
+        return HUGE_METRIC * overlap_metric, None
     
-    # --- Compute gradients using finite differences ---
-    # Horizontal gradients (difference along width)
-    grad_x_h = torch.abs(x[:, :, :, 1:] - x[:, :, :, :-1])
-    grad_p_h = torch.abs(p[:, :, :, 1:] - p[:, :, :, :-1])
-    
-    # Vertical gradients (difference along height)
-    grad_x_v = torch.abs(x[:, :, 1:, :] - x[:, :, :-1, :])
-    grad_p_v = torch.abs(p[:, :, 1:, :] - p[:, :, :-1, :])
-    
-    # Pad the gradients to restore original shape (B,1,H,W)
-    grad_x_h = F.pad(grad_x_h, (0, 1, 0, 0), mode='replicate')
-    grad_p_h = F.pad(grad_p_h, (0, 1, 0, 0), mode='replicate')
-    grad_x_v = F.pad(grad_x_v, (0, 0, 0, 1), mode='replicate')
-    grad_p_v = F.pad(grad_p_v, (0, 0, 0, 1), mode='replicate')
-    
-    # Total gradient (simple sum of horizontal and vertical components)
-    grad_x_total = grad_x_h + grad_x_v
-    grad_p_total = grad_p_h + grad_p_v
-    
-    # --- Loss Components ---
-    # 1) Gradient similarity loss:
-    #   In background areas (m high), x should have a similar gradient to p.
-    L_grad_sim = (m * (grad_x_total - grad_p_total) ** 2).mean()
-    
-    # 2) Edge penalty:
-    #   In regions with strong gradients in x (i.e. edges), the mask should be low (foreground).
-    #   If m is high in these regions, we add a penalty.
-    L_edge = (m * (grad_x_total ** 2)).mean()
-    
-    # 3) Binary constraint: encourages m to be close to 0 or 1.
-    L_bin = (m * (1 - m)).mean()
-    
-    # 4) Coverage loss: encourages the overall background area to be around 50% of the image.
-    L_cov = (0.5 - m.mean()).abs()
-    
-    return L_grad_sim + gamma * L_edge + alpha * L_bin + beta * L_cov
+    return overlap_metric, masked_img
