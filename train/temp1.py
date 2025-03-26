@@ -159,89 +159,85 @@ def differentiable_entropy(x, num_bins=64, sigma=0.02):
     normalized_entropy = entropy / torch.log(torch.tensor(num_bins, device=x.device, dtype=x.dtype))
     return normalized_entropy.mean()
 
-def compute_smoothness_loss(threshold_pattern, max_tv=10000, max_lap_var=0.02, num_bins=64, sigma=0.02):
-    """
-    Compute a smoothness loss from several differentiable metrics on the threshold pattern.
-    
-    Args:
-      threshold_pattern: [B,1,H,W] network output (assumed to be in [0,1]).
-      max_tv: maximum total variation (for normalization).
-      max_lap_var: maximum Laplacian variance (for normalization).
-      num_bins: number of bins for differentiable entropy.
-      sigma: bandwidth for the soft histogram.
-      
-    Returns:
-      A scalar tensor representing the smoothness loss (higher means more edge-rich/complex).
-    """
-    # Normalize threshold_pattern to [0,1] (should be nearly so, but for stability)
-    tp_min = threshold_pattern.amin(dim=[1,2,3], keepdim=True)
-    tp_max = threshold_pattern.amax(dim=[1,2,3], keepdim=True)
-    norm_tp = (threshold_pattern - tp_min) / (tp_max - tp_min + 1e-8)
-    
-    # 1. Sobel Edge Score.
-    sobel_kernel_x = torch.tensor([[1, 0, -1],
-                                   [2, 0, -2],
-                                   [1, 0, -1]], dtype=norm_tp.dtype, device=norm_tp.device).view(1, 1, 3, 3)
-    sobel_kernel_y = torch.tensor([[1, 2, 1],
-                                   [0, 0, 0],
-                                   [-1, -2, -1]], dtype=norm_tp.dtype, device=norm_tp.device).view(1, 1, 3, 3)
-    grad_x = F.conv2d(norm_tp, sobel_kernel_x, padding=1)
-    grad_y = F.conv2d(norm_tp, sobel_kernel_y, padding=1)
-    edge_magnitude = torch.sqrt(grad_x**2 + grad_y**2 + 1e-8)
-    edge_mean = edge_magnitude.mean(dim=[1,2,3])
-    # Normalize: maximum edge strength approximated by 1.41 (L2 norm of [1,2,1]).
-    edge_score = torch.clamp(edge_mean / 1.41, 0, 1)
-    
-    # 2. Laplacian Variance Score.
-    laplacian_kernel = torch.tensor([[0, 1, 0],
-                                     [1, -4, 1],
-                                     [0, 1, 0]], dtype=norm_tp.dtype, device=norm_tp.device).view(1, 1, 3, 3)
-    lap = F.conv2d(norm_tp, laplacian_kernel, padding=1)
-    lap_var = lap.var(dim=[1,2,3])
-    lap_score = torch.clamp(torch.log1p(lap_var) / torch.log1p(torch.tensor(max_lap_var, device=norm_tp.device, dtype=norm_tp.dtype)), 0, 1)
-    
-    # 3. Entropy Score.
-    ent = differentiable_entropy(norm_tp, num_bins=num_bins, sigma=sigma)
-    entropy_score = torch.clamp(ent / 8.0, 0, 1)
-    
-    # 4. Total Variation Score.
-    tv_h = torch.abs(norm_tp[:, :, 1:, :] - norm_tp[:, :, :-1, :]).sum(dim=[1,2,3])
-    tv_v = torch.abs(norm_tp[:, :, :, 1:] - norm_tp[:, :, :, :-1]).sum(dim=[1,2,3])
-    tv = tv_h + tv_v
-    tv_score = torch.clamp(torch.log1p(tv) / torch.log1p(torch.tensor(max_tv, device=norm_tp.device, dtype=norm_tp.dtype)), 0, 1)
-    
-    combined_loss = (edge_score + lap_score + entropy_score + tv_score) / 4.0
-    return combined_loss.mean()
+import torch
+import torch.nn.functional as F
 
-def final_loss(image, template_mask, threshold_pattern, 
-               k=10.0, lambda_seg=1.0, lambda_smooth=1.0,
-               max_tv=10000, max_lap_var=0.02, num_bins=64, sigma=0.02):
+def polynomial_fit_loss(threshold_pattern):
     """
-    Final loss function for training.
+    For each sample in the batch, fits a 2D quadratic polynomial
+    P(x, y) = a*x^2 + b*y^2 + c*x*y + d*x + e*y + f
+    to the threshold pattern and returns the mean MSE between the threshold_pattern
+    and the fitted polynomial evaluated on a grid.
     
     Args:
-      image: [B,1,H,W] original depth image.
-      template_mask: [B,1,H,W] template mask.
-      threshold_pattern: [B,1,H,W] network output (should be in [0,1]).
-      k: steepness factor for soft thresholding.
-      lambda_seg: weight for the segmentation loss (soft-threshold masked image vs. template mask).
-      lambda_smooth: weight for the smoothness loss (edge, Laplacian, entropy, TV).
-      lambda_bin: weight for the binary penalty (prevent threshold values from nearing 0 or 1).
-      margin: threshold margin below which (or above 1-margin) values are penalized.
-      max_tv, max_lap_var, num_bins, sigma: parameters for smoothness loss normalization.
-      
+      threshold_pattern: tensor of shape [B, 1, H, W] (values assumed in [0,1])
+    
     Returns:
-      A scalar tensor: the final loss.
+      A scalar tensor representing the polynomial fitting loss.
+    """
+    B, C, H, W = threshold_pattern.shape
+    # Create a coordinate grid for the image.
+    # We'll use normalized coordinates in [0, 1].
+    y_grid, x_grid = torch.meshgrid(
+        torch.linspace(0, 1, H, device=threshold_pattern.device),
+        torch.linspace(0, 1, W, device=threshold_pattern.device),
+        indexing='ij'
+    )  # each of shape [H, W]
+    # Flatten the grids to vectors of length N = H*W.
+    x_flat = x_grid.reshape(-1)  # [N]
+    y_flat = y_grid.reshape(-1)  # [N]
+    N = H * W
+    # Build design matrix X with columns: [x^2, y^2, x*y, x, y, 1]
+    X = torch.stack([x_flat**2, y_flat**2, x_flat*y_flat, x_flat, y_flat, torch.ones_like(x_flat)], dim=1)  # [N, 6]
+    # We'll repeat this matrix for each sample.
+    X = X.unsqueeze(0).repeat(B, 1, 1)  # [B, N, 6]
+    
+    # Flatten threshold_pattern per sample: shape [B, N]
+    T = threshold_pattern.view(B, N)  # [B, N]
+    
+    # For each sample, solve for polynomial coefficients p such that X @ p ~ T.
+    # We'll use the differentiable pseudo-inverse (pinverse).
+    # p will have shape [B, 6, 1]
+    p = torch.linalg.pinv(X) @ T.unsqueeze(2)  # [B, 6, 1]
+    
+    # Reconstruct the fitted polynomial surface.
+    T_fit = X @ p  # [B, N, 1]
+    T_fit = T_fit.view(B, 1, H, W)  # [B, 1, H, W]
+    
+    # Compute MSE between threshold_pattern and its quadratic approximation.
+    poly_loss = F.mse_loss(threshold_pattern, T_fit)
+    return poly_loss
+
+def final_loss(image, template_mask, threshold_pattern, k=10.0, 
+               lambda_seg=1.0, lambda_poly=1.0):
+    """
+    Final loss function that combines:
+      (1) A segmentation loss: the L1 loss between a soft-threshold masked image 
+          and the template masked image.
+      (2) A polynomial regularization loss: MSE between the threshold pattern and 
+          its best-fit 2D quadratic polynomial.
+    
+    Args:
+      image: tensor [B,1,H,W] original depth image (normalized).
+      template_mask: tensor [B,1,H,W] template masked image (normalized).
+      threshold_pattern: tensor [B,1,H,W] network output (values in [0,1]).
+      k: steepness factor for the soft thresholding sigmoid.
+      lambda_seg: weight for the segmentation loss.
+      lambda_poly: weight for the polynomial loss.
+    
+    Returns:
+      A scalar tensor representing the combined loss.
     """
     # Compute a differentiable soft mask.
+    # For each pixel, if image < threshold_pattern then mask ~1, otherwise mask ~0.
     mask = 1 - torch.sigmoid(k * (image - threshold_pattern))
     masked_image = image * mask
     seg_loss = F.l1_loss(masked_image, template_mask)
     
-    # Compute the smoothness loss on the threshold pattern.
-    smooth_loss = compute_smoothness_loss(threshold_pattern, max_tv=max_tv, max_lap_var=max_lap_var, num_bins=num_bins, sigma=sigma)
-
-    total_loss = lambda_seg * seg_loss + lambda_smooth * smooth_loss
+    # Compute the polynomial fitting loss.
+    poly_loss = polynomial_fit_loss(threshold_pattern)
+    
+    total_loss = lambda_seg * seg_loss + lambda_poly * poly_loss
     return total_loss
 
 # -------------------------
