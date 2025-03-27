@@ -6,6 +6,8 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 import torch.nn.functional as F
+import numpy as np
+from scipy.interpolate import LSQBivariateSpline
 
 # -------------------------
 # UNet Model Definition
@@ -126,171 +128,6 @@ class ImagePatternDataset(Dataset):
         
         return depth_img, template_mask
 
-import torch
-import torch.nn.functional as F
-
-def differentiable_entropy(x, num_bins=64, sigma=0.02):
-    """
-    Compute a differentiable approximation to Shannon entropy.
-    
-    Args:
-      x: tensor of shape [B,1,H,W] with values in [0,1].
-      num_bins: number of histogram bins.
-      sigma: controls the softness of the histogram binning.
-      
-    Returns:
-      Average normalized entropy over the batch (scalar tensor).
-    """
-    B, C, H, W = x.shape
-    N = H * W
-    x_flat = x.view(B, N)  # shape: [B, N]
-    # Create bin centers between 0 and 1.
-    bin_centers = torch.linspace(0, 1, num_bins, device=x.device, dtype=x.dtype).view(1, num_bins)
-    # Compute soft assignments: for each pixel, weight for each bin.
-    x_expanded = x_flat.unsqueeze(2)  # shape: [B, N, 1]
-    bin_centers_expanded = bin_centers.unsqueeze(1)  # shape: [B, 1, num_bins]
-    weights = torch.exp(-((x_expanded - bin_centers_expanded)**2) / (2 * sigma**2))  # [B, N, num_bins]
-    # Sum over pixels to get a soft histogram.
-    hist = weights.sum(dim=1)  # [B, num_bins]
-    hist = hist / (hist.sum(dim=1, keepdim=True) + 1e-8)
-    # Compute entropy: H = - sum(p * log(p)).
-    entropy = - (hist * torch.log(hist + 1e-8)).sum(dim=1)  # [B]
-    # Normalize entropy by log(num_bins) so that maximum entropy is 1.
-    normalized_entropy = entropy / torch.log(torch.tensor(num_bins, device=x.device, dtype=x.dtype))
-    return normalized_entropy.mean()
-
-import torch
-import torch.nn.functional as F
-
-def polynomial_fit_loss(threshold_pattern):
-    """
-    For each sample in the batch, fits a 2D quadratic polynomial
-    P(x, y) = a*x^2 + b*y^2 + c*x*y + d*x + e*y + f
-    to the threshold pattern and returns the mean MSE between the threshold_pattern
-    and the fitted polynomial evaluated on a grid.
-    
-    Args:
-      threshold_pattern: tensor of shape [B, 1, H, W] (values assumed in [0,1])
-    
-    Returns:
-      A scalar tensor representing the polynomial fitting loss.
-    """
-    B, C, H, W = threshold_pattern.shape
-    # Create a coordinate grid for the image.
-    # We'll use normalized coordinates in [0, 1].
-    y_grid, x_grid = torch.meshgrid(
-        torch.linspace(0, 1, H, device=threshold_pattern.device),
-        torch.linspace(0, 1, W, device=threshold_pattern.device),
-        indexing='ij'
-    )  # each of shape [H, W]
-    # Flatten the grids to vectors of length N = H*W.
-    x_flat = x_grid.reshape(-1)  # [N]
-    y_flat = y_grid.reshape(-1)  # [N]
-    N = H * W
-    # Build design matrix X with columns: [x^2, y^2, x*y, x, y, 1]
-    X = torch.stack([x_flat**2, y_flat**2, x_flat*y_flat, x_flat, y_flat, torch.ones_like(x_flat)], dim=1)  # [N, 6]
-    # We'll repeat this matrix for each sample.
-    X = X.unsqueeze(0).repeat(B, 1, 1)  # [B, N, 6]
-    
-    # Flatten threshold_pattern per sample: shape [B, N]
-    T = threshold_pattern.view(B, N)  # [B, N]
-    
-    # For each sample, solve for polynomial coefficients p such that X @ p ~ T.
-    # We'll use the differentiable pseudo-inverse (pinverse).
-    # p will have shape [B, 6, 1]
-    p = torch.linalg.pinv(X) @ T.unsqueeze(2)  # [B, 6, 1]
-    
-    # Reconstruct the fitted polynomial surface.
-    T_fit = X @ p  # [B, N, 1]
-    T_fit = T_fit.view(B, 1, H, W)  # [B, 1, H, W]
-    
-    # Compute MSE between threshold_pattern and its quadratic approximation.
-    poly_loss = F.mse_loss(threshold_pattern, T_fit)
-    return poly_loss
-
-def final_loss(image, template_mask, threshold_pattern, k=10.0, 
-               lambda_seg=1.0, lambda_poly=1.0):
-    """
-    Final loss function that combines:
-      (1) A segmentation loss: the L1 loss between a soft-threshold masked image 
-          and the template masked image.
-      (2) A polynomial regularization loss: MSE between the threshold pattern and 
-          its best-fit 2D quadratic polynomial.
-    
-    Args:
-      image: tensor [B,1,H,W] original depth image (normalized).
-      template_mask: tensor [B,1,H,W] template masked image (normalized).
-      threshold_pattern: tensor [B,1,H,W] network output (values in [0,1]).
-      k: steepness factor for the soft thresholding sigmoid.
-      lambda_seg: weight for the segmentation loss.
-      lambda_poly: weight for the polynomial loss.
-    
-    Returns:
-      A scalar tensor representing the combined loss.
-    """
-    # Compute a differentiable soft mask.
-    # For each pixel, if image < threshold_pattern then mask ~1, otherwise mask ~0.
-    mask = 1 - torch.sigmoid(k * (image - threshold_pattern))
-    masked_image = image * mask
-    seg_loss = F.l1_loss(masked_image, template_mask)
-    
-    # Compute the polynomial fitting loss.
-    poly_loss = polynomial_fit_loss(threshold_pattern)
-    
-    total_loss = lambda_seg * seg_loss + lambda_poly * poly_loss
-    return total_loss
-
-# -------------------------
-# Training Function
-# -------------------------
-def train_model(model, dataloader, epochs=10, lr=1e-4, device='cuda', checkpoint_interval=5, checkpoint_dir='./checkpoints'):
-    """
-    Trains the UNet model with the differentiable segmentation loss.
-    
-    Parameters:
-      model             -> instance of UNet.
-      dataloader        -> yields (depth_image_batch, template_mask_batch).
-      epochs            -> number of training epochs.
-      lr                -> learning rate.
-      device            -> 'cuda' or 'cpu'.
-      checkpoint_interval -> save model every N epochs.
-      checkpoint_dir    -> directory to save checkpoint files.
-    """
-    model.to(device)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    os.makedirs(checkpoint_dir, exist_ok=True)
-
-    for epoch in range(epochs):
-        epoch_loss = 0.0
-        model.train()
-        
-        for batch_idx, (x_batch, template_mask) in enumerate(dataloader):
-            x_batch = x_batch.to(device)
-            template_mask = template_mask.to(device)
-
-            optimizer.zero_grad()
-            # Forward pass: produce threshold pattern from depth image.
-            th_pattern = model(x_batch)
-            loss_value = final_loss(x_batch, template_mask, th_pattern)
-            loss_value.backward()
-            optimizer.step()
-
-            epoch_loss += loss_value.item()
-        
-        avg_loss = epoch_loss / len(dataloader)
-        print(f"Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.4f}")
-        
-        # Save checkpoint if needed
-        if (epoch + 1) % checkpoint_interval == 0:
-            checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch+1}.pth")
-            torch.save({
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': avg_loss,
-            }, checkpoint_path)
-            print(f"Checkpoint saved at {checkpoint_path}")
-
 # -------------------------
 # Model Creation Function
 # -------------------------
@@ -372,3 +209,169 @@ def evaluate_model(model_checkpoint_path, input_image_path, template_mask_path, 
     print(f"Saved threshold pattern to {threshold_pattern_path}")
     print(f"Saved template mask to {template_mask_path_out}")
 
+# -----------------------------
+# Your Provided Spline Fitter (unchanged)
+# -----------------------------
+class VisualSplineFit:
+    def __init__(self, x_coeffs=4, degree_x=3, degree_y=3):
+        """
+        A simple 2D spline-fitting helper for a grayscale image of shape (H, W).
+        """
+        self.degree_x = degree_x
+        self.degree_y = degree_y
+        self.num_coeffs_x = x_coeffs
+        self.params_init = False
+
+    def initParams(self, img_shape):
+        self.H, self.W = img_shape  # shape of the image
+        self.num_coeffs_y = int(np.round((float(self.H) / self.W) * self.num_coeffs_x))
+
+        X, Y = np.meshgrid(
+            np.linspace(0, 1, self.W),
+            np.linspace(0, 1, self.H)
+        )
+        self.x = X.ravel()
+        self.y = Y.ravel()
+
+        self.num_knots_x = self.num_coeffs_x + self.degree_x + 1
+        self.num_knots_y = self.num_coeffs_y + self.degree_y + 1
+        self.num_inner_knots_x = self.num_knots_x - 2 * self.degree_x
+        self.num_inner_knots_y = self.num_knots_y - 2 * self.degree_y
+
+        self.inner_knots_x = np.linspace(0, 1, self.num_inner_knots_x + 2)[1:-1]
+        self.inner_knots_y = np.linspace(0, 1, self.num_inner_knots_y + 2)[1:-1]
+        self.params_init = True
+
+    def fit(self, img):
+        """
+        Fits a 2D B-spline to the image data (H x W) using LSQBivariateSpline.
+        Returns the fitted surface as a NumPy array (H x W).
+        """
+        if not self.params_init:
+            self.initParams(img.shape)
+
+        z = img.astype(np.float64).ravel()
+        spline = LSQBivariateSpline(
+            self.x,
+            self.y,
+            z,
+            tx=self.inner_knots_x,
+            ty=self.inner_knots_y,
+            kx=self.degree_x,
+            ky=self.degree_y
+        )
+        x_sorted = np.linspace(0, 1, self.W)
+        y_sorted = np.linspace(0, 1, self.H)
+        fitted_2d = spline(x_sorted, y_sorted)
+        if fitted_2d.shape[1] == self.H and fitted_2d.shape[0] == self.W:
+            fitted_2d = fitted_2d.T
+        return fitted_2d
+
+# -----------------------------
+# Custom Autograd Function: SplineFitSTE
+# -----------------------------
+class SplineFitSTE(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, output_img):
+        """
+        Forward pass: Convert the network output to NumPy, call VisualSplineFit.fit,
+        then convert the fitted result back to a torch tensor.
+        """
+        # output_img: [B, 1, H, W]
+        output_np = output_img.detach().cpu().numpy()
+        B, C, H, W = output_np.shape
+        vsf = VisualSplineFit(x_coeffs=4, degree_x=3, degree_y=3)
+        fitted_list = []
+        for i in range(B):
+            sample = output_np[i, 0, :, :]
+            fitted = vsf.fit(sample)
+            fitted_list.append(fitted)
+        fitted_array = np.stack(fitted_list, axis=0)  # shape: [B, H, W]
+        fitted_tensor = torch.from_numpy(fitted_array).unsqueeze(1).to(output_img.device).type_as(output_img)
+        return fitted_tensor
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Straight-through estimator: pass the gradient through unchanged.
+        return grad_output
+
+# -----------------------------
+# Updated LossCalculator using SplineFitSTE
+# -----------------------------
+class LossCalculator(nn.Module):
+    """
+    This loss calculator:
+      - Passes the network's raw output (threshold pattern) through SplineFitSTE to obtain a smooth spline.
+      - Uses the fitted spline to generate a soft mask via a sigmoid.
+      - Computes the loss as 1 minus the overlap between the masked image and the template mask.
+    """
+    def __init__(self, k=10.0):
+        super(LossCalculator, self).__init__()
+        self.k = k
+
+    def forward(self, input_image, tmask, output_img):
+        # Use the custom autograd function for spline fitting.
+        fitted_spline = SplineFitSTE.apply(output_img)
+        # Generate a soft mask: pixels where input_image is below the fitted spline are preserved.
+        soft_mask = 1 - torch.sigmoid(self.k * (input_image - fitted_spline))
+        masked_image = input_image * soft_mask
+        # Compute overlap: sum over template area divided by template area.
+        overlap_ratio = torch.sum(tmask * masked_image) / (torch.sum(tmask) + 1e-8)
+        loss = 1 - overlap_ratio
+        return loss
+
+# -----------------------------
+# Revised train_model using LossCalculator
+# -----------------------------
+def train_model(model, dataloader, epochs=10, lr=1e-4, device='cuda', 
+                checkpoint_interval=5, checkpoint_dir='./checkpoints'):
+    """
+    Trains the model using the LossCalculator (which leverages the spline fitter with a straight-through estimator).
+    
+    Parameters:
+      model: network model (expects input: [B,1,H,W])
+      dataloader: yields (input_image, template_mask) pairs (both [B,1,H,W])
+      epochs: number of training epochs
+      lr: learning rate
+      device: device to run on ('cuda' or 'cpu')
+      checkpoint_interval: number of epochs between checkpoints
+      checkpoint_dir: directory to save checkpoints
+    """
+    model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    loss_calc = LossCalculator(k=10.0)
+    loss_calc.to(device)
+    
+    for epoch in range(epochs):
+        epoch_loss = 0.0
+        model.train()
+        
+        for batch_idx, (x_batch, template_mask) in enumerate(dataloader):
+            x_batch = x_batch.to(device)
+            template_mask = template_mask.to(device)
+            
+            optimizer.zero_grad()
+            # Forward pass: get the raw threshold pattern from the model.
+            output = model(x_batch)
+            # Compute loss using LossCalculator.
+            loss_value = loss_calc(x_batch, template_mask, output)
+            
+            loss_value.backward()
+            optimizer.step()
+            
+            epoch_loss += loss_value.item()
+        
+        avg_loss = epoch_loss / len(dataloader)
+        print(f"Epoch [{epoch+1}/{epochs}], Loss: {avg_loss:.4f}")
+        
+        if (epoch + 1) % checkpoint_interval == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch+1}.pth")
+            torch.save({
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_loss,
+            }, checkpoint_path)
+            print(f"Checkpoint saved at {checkpoint_path}")
