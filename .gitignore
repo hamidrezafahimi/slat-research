@@ -7,3 +7,5 @@ output/
 *#
 data/
 *.jpeg
+*.npy
+*.csv
