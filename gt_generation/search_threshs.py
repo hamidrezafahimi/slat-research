@@ -15,8 +15,10 @@ def get_cell_info(img_shape, cell_width_ratio):
     num_cells_x = width // cell_width
     return cell_width, cell_height, num_cells_x, num_cells_y
 
+def apply_threshold(image, threshold_pattern):
+    return np.where(image > threshold_pattern, 255, 0).astype(np.uint8)
 
-class ThresholdSearcher:
+class AutoDepthBGSubtractor:
     def __init__(self, glob_step=3, cell_w_r=0.2, occupied_cell_fraction=0.002, 
                  imwrite_global=False, imwrite_local=False, 
                  log_all=False, log_global=False, log_local=False):
@@ -37,6 +39,11 @@ class ThresholdSearcher:
         self.edge_template_threshold = 25
         self.doneWithMosaicArray = False
         self.occupied_cell_fraction = occupied_cell_fraction
+        self.canny_min=0
+        self.canny_max=255
+        self.match_threshold_humming=300
+        self.kp_pos_radius_fraction=0.0264
+        self.cbachss = 5 # Corner Based Adjacency Check Square Size
 
         # We'll store adjacency-failure lines here
         self.adjFailurePixels = set()
@@ -55,12 +62,8 @@ class ThresholdSearcher:
         else:
             self.loc_dir = None
     
-    def compute_edge_metric(self, masked_image, template_mask, 
-                            canny_min=0, 
-                            canny_max=255, 
-                            match_threshold=300,
-                            pos_radius_fraction=0.0001):
-        detected_edges = cv2.Canny(masked_image, canny_min, canny_max)
+    def compute_edge_metric(self, masked_image, template_mask):
+        detected_edges = cv2.Canny(masked_image, self.canny_min, self.canny_max)
         kernel = np.ones((5, 5), np.uint8) 
         detected_edges = cv2.dilate(detected_edges, kernel, iterations=1) 
 
@@ -76,12 +79,12 @@ class ThresholdSearcher:
         matches = sorted(matches, key=lambda x: x.distance)
 
         h, w = masked_image.shape[:2]
-        pixel_radius = pos_radius_fraction * (w * h)
+        pixel_radius = self.kp_pos_radius_fraction * np.sqrt(w**2 + h**2)
 
         good_matches = []
         good_match_coords = []
         for m in matches:
-            if m.distance < match_threshold:
+            if m.distance < self.match_threshold_humming:
                 (x1, y1) = kp_detected[m.queryIdx].pt
                 (x2, y2) = kp_template[m.trainIdx].pt
                 dist = np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
@@ -115,11 +118,6 @@ class ThresholdSearcher:
         row_thresholds = np.clip(row_thresholds, 0, 255).astype(np.uint8)
         return np.tile(row_thresholds[:, np.newaxis], (1, W))
 
-    def apply_threshold(self, image, threshold_pattern):
-        bin_out = ((image > threshold_pattern).astype(np.uint8)) * 255
-        masked_image = np.where(bin_out == 0, image, 0).astype(np.uint8)
-        return bin_out, masked_image
-
     def iterateLinear(self, bt_range, slope_range, step):
         depth_image = self.currentDImg
         template_mask = self.currentTMask
@@ -128,14 +126,13 @@ class ThresholdSearcher:
         for bt in range(bt_range[0], bt_range[1], step):
             for slope in range(slope_range[0], slope_range[1], step):
                 threshold_pattern = self.compute_threshold_pattern((H, W), bt, slope)
-                binary_output, masked_image = self.apply_threshold(depth_image, threshold_pattern)
+                binary_output = apply_threshold(depth_image, threshold_pattern)
                 
-                mask = (masked_image != 0)
-                unmasked_count = np.count_nonzero(mask)
-                unmasked_fraction = unmasked_count / self.total_pixels
+                fg_count = np.count_nonzero(binary_output)
+                bg_fraction = 1.0 - (fg_count / self.total_pixels)
 
                 if np.all(binary_output == 0) or np.all(binary_output == 255) or \
-                   unmasked_fraction < 0.25:
+                   bg_fraction < 0.25:
                     all_candidates.append({
                         "bottom_threshold": bt,
                         "slope": slope,
@@ -155,7 +152,7 @@ class ThresholdSearcher:
                     "slope": slope,
                     "metric": metric,
                     "coords": coords,
-                    "masked_image": masked_image,
+                    "masked_image": binary_output,
                     "threshold_pattern": threshold_pattern,
                     "kp_image": kp_image,
                     "edge_image": eg_img,
@@ -233,7 +230,7 @@ class ThresholdSearcher:
             while r < y2:
                 # occupant's masked row
                 rowdata = occupant_masked[r, x1:x2]
-                if np.any(rowdata != 0):
+                if np.any(rowdata == 0):
                     break
                 # If TMask has 255 in this row => stop
                 if np.any(self.currentTMask[r, x1:x2] == 255):
@@ -247,7 +244,7 @@ class ThresholdSearcher:
             r = y2 - 1
             while r >= y1:
                 rowdata = occupant_masked[r, x1:x2]
-                if np.any(rowdata != 0):
+                if np.any(rowdata == 0):
                     break
                 if np.any(self.currentTMask[r, x1:x2] == 255):
                     break
@@ -259,7 +256,7 @@ class ThresholdSearcher:
             c = x1
             while c < x2:
                 coldata = occupant_masked[y1:y2, c]
-                if np.any(coldata != 0):
+                if np.any(coldata == 0):
                     break
                 if np.any(self.currentTMask[y1:y2, c] == 255):
                     break
@@ -271,7 +268,7 @@ class ThresholdSearcher:
             c = x2 - 1
             while c >= x1:
                 coldata = occupant_masked[y1:y2, c]
-                if np.any(coldata != 0):
+                if np.any(coldata == 0):
                     break
                 if np.any(self.currentTMask[y1:y2, c] == 255):
                     break
@@ -309,22 +306,22 @@ class ThresholdSearcher:
                     if boundary_tag == 'top':
                         # occupant top row
                         top_row = occupant_masked[y1, x1:x2]
-                        if np.count_nonzero(top_row)==0:
+                        if np.all(top_row==255):
                             self.markBoundaryLine(occupant_masked,'top',y1,y2,x1,x2)
                             return False
                     elif boundary_tag == 'bottom':
                         bot_row = occupant_masked[y2-1, x1:x2]
-                        if np.count_nonzero(bot_row)==0:
+                        if np.all(bot_row==255):
                             self.markBoundaryLine(occupant_masked,'bottom',y1,y2,x1,x2)
                             return False
                     elif boundary_tag == 'left':
                         left_col = occupant_masked[y1:y2, x1]
-                        if np.count_nonzero(left_col)==0:
+                        if np.all(left_col==255):
                             self.markBoundaryLine(occupant_masked,'left',y1,y2,x1,x2)
                             return False
                     else:
                         right_col = occupant_masked[y1:y2, x2-1]
-                        if np.count_nonzero(right_col)==0:
+                        if np.all(right_col==255):
                             self.markBoundaryLine(occupant_masked,'right',y1,y2,x1,x2)
                             return False
         return True
@@ -457,133 +454,126 @@ class ThresholdSearcher:
     def cornerBasedAdjacencyCheck(self, masked_image):
         """
         For each *internal* grid node (row_node, col_node),
-        we check the four 5x5 squares around it in masked_image:
+        we examine the four 5x5 squares around that node:
+            top-left  => masked_image[node_y-5:node_y,   node_x-5:node_x]
+            top-right => masked_image[node_y-5:node_y,   node_x:node_x+5]
+            bot-left  => masked_image[node_y:node_y+5,   node_x-5:node_x]
+            bot-right => masked_image[node_y:node_y+5,   node_x:node_x+5]
 
-            top-left block  => [node_y-5 : node_y,   node_x-5 : node_x]
-            top-right block => [node_y-5 : node_y,   node_x     : node_x+5]
-            bot-left block  => [node_y    : node_y+5, node_x-5 : node_x]
-            bot-right block => [node_y    : node_y+5, node_x     : node_x+5]
+        Each square is considered "fully occupant" if it's all 255 in the masked_image.
+        If exactly one of these squares is fully 255, we find the corresponding neighbor cell
+        (top-left => cell(row_node-1, col_node-1), etc.) and perform expansions in that subregion:
+        - row expansions (top -> down, bottom -> up)
+        - column expansions (left -> right, right -> left)
+        We add all those occupant pixels to self.adjFailurePixels, but **stop expansions** if we see:
+        - masked_image == 0 (background), or
+        - self.currentTMask == 255 (some edge region).
 
-        If *exactly one* of these squares is fully black (all zero),
-        and the other three are not fully black, we do expansions
-        in that cell's subregion. We'll define expansions (top/bot/left/right)
-        similarly to markBoundaryLine, except we check for:
-        - masked_image != 0 => stop
-        - currentTMask == 255 => stop
-        in the subregion.
-
-        We add all 'expanded' pixels to self.adjFailurePixels.
+        This function is the "corner-based adjacency" check with the **new** annotation:
+        masked_image == 255 => occupant / foreground, masked_image == 0 => background.
         """
 
         H, W = masked_image.shape
 
-        # define a small helper that checks if a 5x5 block is fully black
-        def is_fully_black(r1, r2, c1, c2):
-            # clamp to image boundaries in case we're near edges
+        def is_fully_white(r1, r2, c1, c2):
+            """
+            Returns True if the sub-block in [r1:r2, c1:c2] is entirely 255 in masked_image;
+            also clamps out-of-bounds. If out-of-bounds => returns False.
+            """
             if r1<0 or c1<0 or r2>H or c2>W:
-                return False  # treat out-of-bounds as not fully black
+                return False
             block = masked_image[r1:r2, c1:c2]
-            return np.all(block==0)
+            return np.all(block == 255)
 
-        # expansions are basically row-wise or col-wise expansions from the cell subregion
-        # We'll define a helper for expansions:
         def expand_linewise(row_start, row_end, col_start, col_end, step):
             """
-            Expand row by row from row_start..row_end with step=+1 or step=-1.
-            Stop if masked_image != 0 or currentTMask==255.
-            Add expansions to self.adjFailurePixels.
+            Expand row by row (vertical) from row_start..row_end with a given step (+1 or -1).
+            We add occupant pixels (255) to self.adjFailurePixels,
+            but stop if we see masked_image==0 or self.currentTMask==255.
             """
             r = row_start
-            while (r < row_end if step>0 else r>=row_end):
-                rowdata = masked_image[r, col_start:col_end]
-                # if we see any !=0 => break
-                if np.any(rowdata!=0):
+            while (r < row_end if step>0 else r >= row_end):
+                row_slice = masked_image[r, col_start:col_end]
+                # if any of them == 0 => occupant region is broken => stop
+                if np.any(row_slice == 0):
                     break
-                # if TMask has 255 => break
-                if np.any(self.currentTMask[r, col_start:col_end]==255):
+                # if TMask has 255 => also stop
+                if np.any(self.currentTMask[r, col_start:col_end] == 255):
                     break
-                # otherwise, mark them
+                # Mark these occupant pixels
                 for c in range(col_start, col_end):
-                    self.adjFailurePixels.add((r,c))
+                    self.adjFailurePixels.add((r, c))
                 r += step
 
         def expand_colwise(col_start, col_end, row_start, row_end, step):
             """
-            Expand column by column from col_start..col_end with step=+1 or step=-1
-            stopping if masked_image !=0 or currentTMask==255.
+            Expand column by column (horizontal) from col_start..col_end with step (+1 or -1).
+            Stop expansions if masked_image==0 or TMask==255.
             """
             c = col_start
-            while (c < col_end if step>0 else c>=col_end):
-                coldata = masked_image[row_start:row_end, c]
-                if np.any(coldata!=0):
+            while (c < col_end if step>0 else c >= col_end):
+                col_slice = masked_image[row_start:row_end, c]
+                if np.any(col_slice == 0):
                     break
-                if np.any(self.currentTMask[row_start:row_end, c]==255):
+                if np.any(self.currentTMask[row_start:row_end, c] == 255):
                     break
                 for r in range(row_start, row_end):
-                    self.adjFailurePixels.add((r,c))
+                    self.adjFailurePixels.add((r, c))
                 c += step
 
-        # We'll do expansions for the entire cell subregion: top/bottom/left/right
-        # This is basically the same logic as in markBoundaryLine for each boundary.
-        def expand_cell_subregion(row_cell, col_cell):
-            y1 = row_cell*self.cell_height
-            y2 = y1+self.cell_height
-            x1 = col_cell*self.cell_width
-            x2 = x1+self.cell_width
+        def expand_cell_subregion(r_cell, c_cell):
+            """
+            Once we identify which cell subregion is occupant-based on the corner check,
+            we do expansions on its top, bottom, left, and right boundaries, stopping 
+            if masked_image==0 or TMask==255.
+            """
+            y1 = r_cell * self.cell_height
+            y2 = y1 + self.cell_height
+            x1 = c_cell * self.cell_width
+            x2 = x1 + self.cell_width
             # top boundary => expand downward
             expand_linewise(y1, y2, x1, x2, step=+1)
             # bottom boundary => expand upward
-            expand_linewise(y2-1, y1-1, x1, x2, step=-1)
+            expand_linewise(y2 - 1, y1 - 1, x1, x2, step=-1)
             # left boundary => expand right
             expand_colwise(x1, x2, y1, y2, step=+1)
             # right boundary => expand left
-            expand_colwise(x2-1, x1-1, y1, y2, step=-1)
+            expand_colwise(x2 - 1, x1 - 1, y1, y2, step=-1)
 
         # We'll only iterate over *internal* grid nodes => row_node in [1..num_cells_y-1], col_node in [1..num_cells_x-1]
         # because only those have 4 neighbor cells.
         for row_node in range(1, self.num_cells_y):
-            node_y = row_node*self.cell_height
-            # must remain in range(5..H-5) if we want to check 5x5 blocks
-            if node_y<5 or node_y>H-5:
+            node_y = row_node * self.cell_height
+            if node_y < self.cbachss or node_y > H - self.cbachss:
                 continue
-
             for col_node in range(1, self.num_cells_x):
-                node_x = col_node*self.cell_width
-                if node_x<5 or node_x>W-5:
+                node_x = col_node * self.cell_width
+                if node_x < self.cbachss or node_x > W - self.cbachss:
                     continue
 
-                # define top-left, top-right, bot-left, bot-right blocks
-                # top-left => (node_y-5: node_y, node_x-5: node_x)
-                top_left  = is_fully_black(node_y-5, node_y, node_x-5, node_x)
-                top_right = is_fully_black(node_y-5, node_y, node_x,   node_x+5)
-                bot_left  = is_fully_black(node_y,   node_y+5, node_x-5, node_x)
-                bot_right = is_fully_black(node_y,   node_y+5, node_x,   node_x+5)
+                # check 4 sub-block corners
+                top_left  = is_fully_white(node_y - self.cbachss, node_y, node_x - self.cbachss, node_x)
+                top_right = is_fully_white(node_y - self.cbachss, node_y, node_x, node_x + self.cbachss)
+                bot_left  = is_fully_white(node_y, node_y + self.cbachss, node_x - self.cbachss, node_x)
+                bot_right = is_fully_white(node_y, node_y + self.cbachss, node_x, node_x + self.cbachss)
 
-                # Count how many are fully black
-                count_black = sum([top_left, top_right, bot_left, bot_right])
-                # We only do expansions if exactly 1 is fully black => "one corner"
-                if count_black==1:
-                    # find which corner is black => figure out the *cell* that corner belongs to
-                    # top-left corner => the cell is row_node-1, col_node-1
-                    # top-right => row_node-1, col_node
-                    # bottom-left => row_node, col_node-1
-                    # bottom-right => row_node, col_node
-                    # But we must check if these indices are valid
+                num_corners = sum([top_left, top_right, bot_left, bot_right])
+                if num_corners == 1:
+                    # figure out which corner => subregion expansions
                     if top_left:
-                        r_cell = row_node-1
-                        c_cell = col_node-1
+                        r_cell = row_node - 1
+                        c_cell = col_node - 1
                     elif top_right:
-                        r_cell = row_node-1
+                        r_cell = row_node - 1
                         c_cell = col_node
                     elif bot_left:
                         r_cell = row_node
-                        c_cell = col_node-1
+                        c_cell = col_node - 1
                     else:  # bot_right
                         r_cell = row_node
                         c_cell = col_node
 
-                    if (0<=r_cell<self.num_cells_y) and (0<=c_cell<self.num_cells_x):
-                        # do expansions
+                    if (0 <= r_cell < self.num_cells_y) and (0 <= c_cell < self.num_cells_x):
                         expand_cell_subregion(r_cell, c_cell)
 
 
@@ -645,20 +635,21 @@ class ThresholdSearcher:
         self.adjFailurePixels = set()
 
         # 7) Save final
-        _, _masked = self.apply_threshold(depth_image, combined_thresh)
+        _masked = apply_threshold(depth_image, combined_thresh)
 
         self.cornerBasedAdjacencyCheck(_masked)
 
         for (py, px) in self.adjFailurePixels:
             combined_thresh[py, px] = 255
 
-        _, final_masked = self.apply_threshold(depth_image, combined_thresh)
+        final_masked = apply_threshold(depth_image, combined_thresh)
 
         kernel = np.ones((3, 3), np.uint8) 
         edg = cv2.erode(self.currentTMask, kernel, iterations=1) 
-        final_masked[edg == 255] = 0
+        final_masked[edg == 255] = 255
         out_fname = os.path.join(outdir, f"{depth_image_name}_mimg.jpg")
-        cv2.imwrite(out_fname, final_masked)
+        masked_image = np.where(final_masked == 0, depth_image, 0).astype(np.uint8)
+        cv2.imwrite(out_fname, masked_image)
         print(f"Saved final => {out_fname}")
 
 
@@ -676,7 +667,7 @@ def main():
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    searcher = ThresholdSearcher(
+    searcher = AutoDepthBGSubtractor(
         glob_step=3,
         cell_w_r=0.2,
         occupied_cell_fraction=0.005,
