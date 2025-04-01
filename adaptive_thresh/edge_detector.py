@@ -1,5 +1,6 @@
 import cv2
 import sys
+import numpy as np
 
 def nothing(x):
     pass
@@ -16,6 +17,7 @@ def main():
         return
 
     cv2.namedWindow("Edge Detection")
+    eimg = cv2.imread("edge_image.jpg", cv2.IMREAD_GRAYSCALE)
 
     # Create trackbars for threshold1 and threshold2 (for Canny)
     cv2.createTrackbar("Threshold1", "Edge Detection", 50, 500, nothing)
@@ -28,8 +30,11 @@ def main():
 
         # Apply Canny edge detection
         edges = cv2.Canny(img, t1, t2)
+        kernel = np.ones((3, 3), np.uint8) 
+        edges1 = cv2.dilate(edges, kernel, iterations=1) + eimg
 
-        cv2.imshow("Edge Detection", edges)
+
+        cv2.imshow("Edge Detection", edges1)
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('s'):
