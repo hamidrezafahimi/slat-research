@@ -3,265 +3,14 @@ import numpy as np
 import os
 import csv
 import time
-from scipy.interpolate import LSQBivariateSpline
-from scipy.spatial import Delaunay
-import cv2
-import numpy as np
-from scipy.interpolate import LSQBivariateSpline
-from scipy.spatial import ConvexHull
+from searchBasedDepthDiffuser_helper import *
+from visualSplineFit import VisualSplineFit
 
-import cv2
-import numpy as np
-from scipy.interpolate import LSQBivariateSpline
-from scipy.spatial import ConvexHull  # for hull boundary checks
-
-class VisualSplineFit:
-    def __init__(self, x_coeffs=4, degree_x=3, degree_y=3):
-        """
-        Same constructor signature as before.
-        """
-        self.degree_x = degree_x
-        self.degree_y = degree_y
-        self.num_coeffs_x = x_coeffs
-        self.params_init = False
-
-    def initParams(self, img_shape):
-        """
-        Prepare (x, y) grids and knot vectors for the spline.
-        """
-        self.H, self.W = img_shape
-
-        # Rough guess for how many coeffs in y direction
-        self.num_coeffs_y = int(np.round((float(self.H) / self.W) * self.num_coeffs_x))
-
-        # x, y in [0..1] for each pixel
-        X, Y = np.meshgrid(
-            np.linspace(0, 1, self.W),  # shape => (H, W)
-            np.linspace(0, 1, self.H)
-        )
-        self.x_flat = X.ravel()  # shape => (H*W,)
-        self.y_flat = Y.ravel()  # shape => (H*W,)
-
-        # Prepare knots
-        self.num_knots_x = self.num_coeffs_x + self.degree_x + 1
-        self.num_knots_y = self.num_coeffs_y + self.degree_y + 1
-        self.num_inner_knots_x = self.num_knots_x - 2 * self.degree_x
-        self.num_inner_knots_y = self.num_knots_y - 2 * self.degree_y
-
-        self.inner_knots_x = np.linspace(0, 1, self.num_inner_knots_x + 2)[1:-1]
-        self.inner_knots_y = np.linspace(0, 1, self.num_inner_knots_y + 2)[1:-1]
-
-        self.params_init = True
-
-    def fit(self, img_gray, bin_img):
-        """
-        For interpolation (inside the convex hull of known data) => use spline.
-        For extrapolation (outside that hull) => do row-by-row linear extension.
-        
-        Returns fitted surface as (H x W) float64, with saturation to [0, 255].
-        """
-        if not self.params_init:
-            self.initParams(img_gray.shape)
-
-        # Flatten grayscale intensities
-        z_full = img_gray.astype(np.float64).ravel()
-
-        # Known data: e.g. bin == 0
-        mask_known = (bin_img.ravel() == 0)
-        x_masked = self.x_flat[mask_known]
-        y_masked = self.y_flat[mask_known]
-        z_masked = z_full[mask_known]
-
-        if len(z_masked) < 2:
-            raise ValueError("Not enough known points to fit anything!")
-
-        # 1) Fit Cubic Spline inside the region
-        spline = LSQBivariateSpline(
-            x_masked,
-            y_masked,
-            z_masked,
-            tx=self.inner_knots_x,
-            ty=self.inner_knots_y,
-            kx=self.degree_x,
-            ky=self.degree_y
-        )
-
-        # Evaluate the spline over the full grid => shape (H, W)
-        x_eval = np.linspace(0, 1, self.W)
-        y_eval = np.linspace(0, 1, self.H)
-
-        z_spline_2d = spline(x_eval, y_eval)  # => shape (len(y_eval), len(x_eval))
-        if z_spline_2d.shape != (self.H, self.W):
-            z_spline_2d = z_spline_2d.T  # ensure (H, W)
-
-        # 2) Build the convex hull of known points for inside/outside tests
-        points_known = np.column_stack([x_masked, y_masked])
-        if len(points_known) < 3:
-            # With <3 points, we can't form a polygon. Treat everything as outside.
-            hull_mask = np.zeros((self.H, self.W), dtype=bool)
-        else:
-            hull = ConvexHull(points_known)  # hull.vertices => indices
-            hull_pts = points_known[hull.vertices]  # (N_hull, 2)
-
-            # We'll do a standard 'point in polygon' test for each pixel
-            X_eval, Y_eval = np.meshgrid(x_eval, y_eval)
-            coords_eval = np.column_stack((X_eval.ravel(), Y_eval.ravel()))
-
-            inside = _points_in_poly(coords_eval, hull_pts)  # custom helper
-            hull_mask = inside.reshape((self.H, self.W))
-
-        # 3) Combine spline + row-based extrapolation
-        fitted_2d = np.copy(z_spline_2d)  # start with spline predictions
-        outside_mask = ~hull_mask
-
-        # Precompute the row-based boundary for each row: 
-        row_boundaries = [None]*self.H
-        for row_i in range(self.H):
-            inside_cols = np.where(hull_mask[row_i, :])[0]
-            if inside_cols.size == 0:
-                # No intersection in this row
-                row_boundaries[row_i] = None
-            else:
-                min_col = inside_cols.min()
-                max_col = inside_cols.max()
-                row_boundaries[row_i] = (min_col, max_col)
-
-        # Now handle each row's outside pixels
-        for row_i in range(self.H):
-            minmax = row_boundaries[row_i]
-            if minmax is None:
-                # Entire row is outside => fallback
-                fitted_2d[row_i, :] = _fallback_extrapolate_entire_row(
-                    row_i, fitted_2d, row_boundaries
-                )
-                continue
-
-            min_col, max_col = minmax
-            z_left  = fitted_2d[row_i, min_col]
-            z_right = fitted_2d[row_i, max_col]
-
-            # For columns < min_col => do linear extrapolation from left boundary
-            for col_j in range(0, min_col):
-                if outside_mask[row_i, col_j]:
-                    slope = z_left - fitted_2d[row_i, min_col - 1]
-                    slope_col = 1.0
-                    dist = (col_j - (min_col - 1))
-                    fitted_2d[row_i, col_j] = (
-                        fitted_2d[row_i, min_col - 1] + slope * (dist / slope_col)
-                    )
-
-            # For columns > max_col => do linear extrapolation from right boundary
-            for col_j in range(max_col + 1, self.W):
-                if outside_mask[row_i, col_j]:
-                    # Simple zero slope in this example
-                    fitted_2d[row_i, col_j] = z_right
-
-        # 4) *** SATURATE (CLIP) to [0..255] ***
-        np.clip(fitted_2d, 0, 255, out=fitted_2d)
-        
-        return fitted_2d
-
-
-# -------------------------------------------------------------------------
-# HELPER: Test if a set of points is inside a convex polygon (x,y).
-def _points_in_poly(points, hull_pts):
-    """
-    points: shape (N, 2)
-    hull_pts: shape (M, 2) in some order (the hull's vertices).
-    Returns: boolean array of length N, True if inside
-    """
-    if len(hull_pts) < 3:
-        return np.zeros(len(points), dtype=bool)
-    return _ray_casting(points, hull_pts)
-
-
-def _ray_casting(points, polygon):
-    """ Minimal 'ray casting' approach to test inside vs outside. """
-    x = points[:, 0]
-    y = points[:, 1]
-    inside = np.zeros(len(points), dtype=bool)
-
-    xs = polygon[:, 0]
-    ys = polygon[:, 1]
-    n = len(polygon)
-
-    for ipt, (px, py) in enumerate(points):
-        count_intersect = 0
-        for i in range(n):
-            x1, y1 = xs[i], ys[i]
-            x2, y2 = xs[(i + 1) % n], ys[(i + 1) % n]
-            if y1 > y2:
-                x1, x2 = x2, x1
-                y1, y2 = y2, y1
-            if (py > y1) and (py <= y2):
-                if y2 == y1:
-                    continue
-                intersect_x = x1 + (py - y1)*(x2 - x1)/(y2 - y1)
-                if intersect_x >= px:
-                    count_intersect += 1
-        if (count_intersect % 2) == 1:
-            inside[ipt] = True
-    return inside
-
-
-def _fallback_extrapolate_entire_row(row_i, fitted_2d, row_boundaries):
-    """
-    If the entire row row_i is outside the hull, fallback approach:
-    - Copy from the nearest row above/below that intersects the hull
-      or fill zeros if none found.
-    """
-    H, W = fitted_2d.shape
-    above, below = None, None
-    # search up
-    for r in range(row_i - 1, -1, -1):
-        if row_boundaries[r] is not None:
-            above = r
-            break
-    # search down
-    for r in range(row_i + 1, H):
-        if row_boundaries[r] is not None:
-            below = r
-            break
-
-    if above is None and below is None:
-        # no rows in the entire image intersect => fallback: fill zeros
-        return np.zeros(W, dtype=np.float64)
-
-    # If we only found 'above':
-    if below is None:
-        return fitted_2d[above, :].copy()
-
-    # If we only found 'below':
-    if above is None:
-        return fitted_2d[below, :].copy()
-
-    # If we have both, do vertical interpolation
-    dist_above = row_i - above
-    dist_below = below - row_i
-    total = dist_above + dist_below
-    w_above = dist_below / total
-    w_below = dist_above / total
-    return w_above * fitted_2d[above, :] + w_below * fitted_2d[below, :]
-
-
-HUGE_METRIC = 1e9
-
-def get_cell_info(img_shape, cell_width_ratio):
-    height, width = img_shape
-    cell_width = max(1, int(round(width * cell_width_ratio)))
-    estimated_cells_y = max(1, round(height / cell_width))
-    cell_height = int(round(height / estimated_cells_y))
-    num_cells_y = height // cell_height
-    num_cells_x = width // cell_width
-    return cell_width, cell_height, num_cells_x, num_cells_y
-
-def apply_threshold(image, threshold_pattern):
-    return np.where(image > threshold_pattern, 255, 0).astype(np.uint8)
-
-class AutoDepthBGSubtractor:
-    def __init__(self, glob_step=3, cell_w_r=0.2, occupied_cell_fraction=0.002, 
+class SearchBasedDepthDiffuser:
+    def __init__(self, glob_step=3, cell_w_r=0.2, occupied_cell_fraction=0.002, outdir=None,
                  imwrite_global=False, imwrite_local=False, 
                  log_all=False, log_global=False, log_local=False):
+        self.HUGE_METRIC = 1e9
         self.cell_width_ratio = cell_w_r
         self.glob_step = glob_step
         self.imwrite_global = imwrite_global
@@ -269,6 +18,7 @@ class AutoDepthBGSubtractor:
         self.log_all = log_all
         self.log_global = log_global
         self.log_local = log_local
+        self.output_dir = outdir
 
         self.currentTMask = None
         self.currentDImg = None
@@ -315,7 +65,7 @@ class AutoDepthBGSubtractor:
         kp_template, des_template = orb.detectAndCompute(template_mask, None)
 
         if des_detected is None or des_template is None:
-            return HUGE_METRIC, None, None, None
+            return self.HUGE_METRIC, None, None, None
 
         bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
         matches = bf.match(des_detected, des_template)
@@ -349,7 +99,7 @@ class AutoDepthBGSubtractor:
             matched_image = None
 
         if len(good_matches) == 0:
-            return HUGE_METRIC, None, None, None
+            return self.HUGE_METRIC, None, None, None
         else:
             return (1.0 / len(good_matches)), good_match_coords, matched_image, detected_edges
 
@@ -379,7 +129,7 @@ class AutoDepthBGSubtractor:
                     all_candidates.append({
                         "bottom_threshold": bt,
                         "slope": slope,
-                        "metric": HUGE_METRIC,
+                        "metric": self.HUGE_METRIC,
                         "coords": None,
                         "masked_image": None,
                         "threshold_pattern": None,
@@ -423,7 +173,7 @@ class AutoDepthBGSubtractor:
                 writer = csv.writer(csvfile)
                 writer.writerow(["image_name", "bottom_threshold", "slope", "metric"])
                 for cand in global_candidates_list:
-                    if cand["metric"] < HUGE_METRIC:
+                    if cand["metric"] < self.HUGE_METRIC:
                         writer.writerow([cand["image_name"],
                                          cand["bottom_threshold"],
                                          cand["slope"],
@@ -431,7 +181,7 @@ class AutoDepthBGSubtractor:
 
         if self.imwrite_global and self.glob_dir:
             for cand in global_candidates_list:
-                if cand["metric"] < HUGE_METRIC and cand["masked_image"] is not None:
+                if cand["metric"] < self.HUGE_METRIC and cand["masked_image"] is not None:
                     cv2.imwrite(os.path.join(self.glob_dir, cand["image_name"]),
                                 cand["masked_image"])
                     local_fname_tp = f"globlist_tp_{cand['image_name']}"
@@ -629,7 +379,7 @@ class AutoDepthBGSubtractor:
                                          cand["image_name"],
                                          cand.get("bottom_threshold",-999),
                                          cand.get("slope",-999),
-                                         cand.get("metric",HUGE_METRIC)])
+                                         cand.get("metric",self.HUGE_METRIC)])
 
     ########################################################################
     # STEP 2: occupant re-assign if adjacency fails
@@ -692,7 +442,7 @@ class AutoDepthBGSubtractor:
                                      cand["image_name"],
                                      cand.get("bottom_threshold",-999),
                                      cand.get("slope",-999),
-                                     cand.get("metric",HUGE_METRIC)])
+                                     cand.get("metric",self.HUGE_METRIC)])
 
     def cornerBasedAdjacencyCheck(self, masked_image):
         """
@@ -820,7 +570,7 @@ class AutoDepthBGSubtractor:
                         expand_cell_subregion(r_cell, c_cell)
 
 
-    def search(self, template_mask, depth_image, depth_image_name, outdir):
+    def diffuse(self, template_mask, depth_image, depth_image_name=None):
         self.currentTMask = template_mask
         # Binarize at edge threshold
         self.currentTMask[self.currentTMask < self.edge_template_threshold] = 0
@@ -890,64 +640,22 @@ class AutoDepthBGSubtractor:
         kernel = np.ones((3, 3), np.uint8) 
         edg = cv2.erode(self.currentTMask, kernel, iterations=1) 
         final_masked[edg == 255] = 255
-        out_fname_c = os.path.join(outdir, f"{os.path.splitext(os.path.basename(depth_image_name))[0]}_bgCurve.jpg")
-        out_fname_m = os.path.join(outdir, f"{os.path.splitext(os.path.basename(depth_image_name))[0]}_bgsMasked.jpg")
         masked_image = np.where(final_masked == 0, depth_image, 0).astype(np.uint8)
 
         # 3) Fit using only pixels where the binary image is 0
         fitted_surface = self.spline_fitter.fit(masked_image, final_masked)
         background_curve = fitted_surface + self.spline_offset
         np.clip(background_curve, 0, 255, out=background_curve)
-        m = apply_threshold(depth_image, background_curve)
-        new_masked = np.where(m == 0, depth_image, 0).astype(np.uint8)
-        cv2.imwrite(out_fname_m, new_masked)
-        cv2.imwrite(out_fname_c, background_curve)
-        print(f"Saved final => {out_fname_m}")
+        final_subtraction = apply_threshold(depth_image, background_curve)
 
-
-def main():
-    depth_dir = "../data/depth"
-    tmask_dir = "../data/depth_edge"
-    output_dir = "../data/search_thresh_output"
-
-    depth_files = sorted([f for f in os.listdir(depth_dir) if os.path.isfile(os.path.join(depth_dir, f))])
-    tmask_files = sorted([f for f in os.listdir(tmask_dir) if os.path.isfile(os.path.join(tmask_dir, f))])
-
-    if set(depth_files) != set(tmask_files):
-        raise ValueError("Depth images and template masks must match")
-
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    searcher = AutoDepthBGSubtractor(
-        glob_step=3,
-        cell_w_r=0.2,
-        occupied_cell_fraction=0.005,
-        imwrite_global=True,
-        imwrite_local=True,
-        log_all=True,
-        log_global=True,
-        log_local=True
-    )
-
-    for fname in depth_files:
-        depth_path = os.path.join(depth_dir, fname)
-        tmask_path = os.path.join(tmask_dir, fname)
-
-        depth_image = cv2.imread(depth_path, cv2.IMREAD_GRAYSCALE)
-        if depth_image is None:
-            raise IOError(f"Could not load depth image: {depth_path}")
-        template_mask = cv2.imread(tmask_path, cv2.IMREAD_GRAYSCALE)
-        if template_mask is None:
-            raise IOError(f"Could not load template mask: {tmask_path}")
-        if depth_image.shape != template_mask.shape:
-            raise ValueError(f"Shape mismatch for {fname}")
-
-        basename = os.path.splitext(fname)[0]
-        t0 = time.time()
-        searcher.search(template_mask, depth_image, basename, output_dir)
-        print("time: ", time.time() - t0)
-        print("-------------")
-
-if __name__=="__main__":
-    main()
+        if self.output_dir is not None:
+            out_fname = os.path.join(self.output_dir, f"{os.path.splitext(os.path.basename(depth_image_name))[0]}_subtraction.jpg")
+            out_fname_c = os.path.join(self.output_dir, f"{os.path.splitext(os.path.basename(depth_image_name))[0]}_bgCurve.jpg")
+            out_fname_m = os.path.join(self.output_dir, f"{os.path.splitext(os.path.basename(depth_image_name))[0]}_masked.jpg")
+            new_masked = np.where(final_subtraction == 0, depth_image, 0).astype(np.uint8)
+            cv2.imwrite(out_fname, final_subtraction)
+            cv2.imwrite(out_fname_m, new_masked)
+            cv2.imwrite(out_fname_c, background_curve)
+            print(f"Saved final => {out_fname_m}")
+        
+        return final_subtraction, background_curve
