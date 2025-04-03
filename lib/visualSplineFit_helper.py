@@ -1,7 +1,5 @@
 import numpy as np
 
-# -------------------------------------------------------------------------
-# HELPER: Test if a set of points is inside a convex polygon (x,y).
 def points_in_poly(points, hull_pts):
     """
     points: shape (N, 2)
@@ -44,9 +42,9 @@ def _ray_casting(points, polygon):
 
 def fallback_extrapolate_entire_row(row_i, fitted_2d, row_boundaries):
     """
-    If the entire row row_i is outside the hull, fallback approach:
-    - Copy from the nearest row above/below that intersects the hull
-      or fill zeros if none found.
+    If the entire row row_i is outside the hull, we can do:
+     - Copy from the nearest row above/below that intersects the hull,
+       or fill zeros if none found.
     """
     H, W = fitted_2d.shape
     above, below = None, None
@@ -61,8 +59,8 @@ def fallback_extrapolate_entire_row(row_i, fitted_2d, row_boundaries):
             below = r
             break
 
+    # No valid rows => fill with zeros
     if above is None and below is None:
-        # no rows in the entire image intersect => fallback: fill zeros
         return np.zeros(W, dtype=np.float64)
 
     # If we only found 'above':

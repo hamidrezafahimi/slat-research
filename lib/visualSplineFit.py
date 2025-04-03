@@ -46,7 +46,12 @@ class VisualSplineFit:
         For interpolation (inside the convex hull of known data) => use spline.
         For extrapolation (outside that hull) => do row-by-row linear extension.
         
-        Returns fitted surface as (H x W) float64, with saturation to [0, 255].
+        Additionally, after building the final fitted surface:
+         - Saturate values to [0..255].
+         - Compute the error as abs(fitted - original) for pixels where bin_img==0,
+           and 0 where bin_img!=0.
+         - Return that error map as a uint8 image (0 means exact fit, 255 means
+           abs diff of 255).
         """
         if not self.params_init:
             self.initParams(img_gray.shape)
@@ -95,7 +100,7 @@ class VisualSplineFit:
             X_eval, Y_eval = np.meshgrid(x_eval, y_eval)
             coords_eval = np.column_stack((X_eval.ravel(), Y_eval.ravel()))
 
-            inside = points_in_poly(coords_eval, hull_pts)  # custom helper
+            inside = points_in_poly(coords_eval, hull_pts)
             hull_mask = inside.reshape((self.H, self.W))
 
         # 3) Combine spline + row-based extrapolation
@@ -107,14 +112,13 @@ class VisualSplineFit:
         for row_i in range(self.H):
             inside_cols = np.where(hull_mask[row_i, :])[0]
             if inside_cols.size == 0:
-                # No intersection in this row
                 row_boundaries[row_i] = None
             else:
                 min_col = inside_cols.min()
                 max_col = inside_cols.max()
                 row_boundaries[row_i] = (min_col, max_col)
 
-        # Now handle each row's outside pixels
+        # Handle each row's outside pixels
         for row_i in range(self.H):
             minmax = row_boundaries[row_i]
             if minmax is None:
@@ -132,10 +136,9 @@ class VisualSplineFit:
             for col_j in range(0, min_col):
                 if outside_mask[row_i, col_j]:
                     slope = z_left - fitted_2d[row_i, min_col - 1]
-                    slope_col = 1.0
                     dist = (col_j - (min_col - 1))
                     fitted_2d[row_i, col_j] = (
-                        fitted_2d[row_i, min_col - 1] + slope * (dist / slope_col)
+                        fitted_2d[row_i, min_col - 1] + slope * dist
                     )
 
             # For columns > max_col => do linear extrapolation from right boundary
@@ -144,7 +147,24 @@ class VisualSplineFit:
                     # Simple zero slope in this example
                     fitted_2d[row_i, col_j] = z_right
 
-        # 4) *** SATURATE (CLIP) to [0..255] ***
+        # 4) Saturate the final fitted array to [0..255]
         np.clip(fitted_2d, 0, 255, out=fitted_2d)
+
+        # 5) Compute the error map (abs difference where bin_img == 0, else 0)
+        error_2d = np.zeros((self.H, self.W), dtype=np.float64)
+        # Indices of known data in 2D
+        known_rows, known_cols = np.where(bin_img == 0)
         
-        return fitted_2d
+        # For known pixels, error = |fitted - original|
+        error_2d[known_rows, known_cols] = np.abs(
+            fitted_2d[known_rows, known_cols] - img_gray[known_rows, known_cols]
+        )
+
+        # Clip the error range to [0..255]
+        np.clip(error_2d, 0, 255, out=error_2d)
+
+        # Convert error to uint8
+        error_8u = error_2d.astype(np.uint8)
+
+        # Return the error image
+        return fitted_2d, error_8u

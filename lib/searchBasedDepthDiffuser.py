@@ -4,7 +4,7 @@ import os
 import csv
 import time
 from searchBasedDepthDiffuser_helper import *
-from visualSplineFit import VisualSplineFit
+from visSpFitsWrapper import VisSpFitsWrapper
 
 class SearchBasedDepthDiffuser:
     def __init__(self, glob_step=3, cell_w_r=0.2, occupied_cell_fraction=0.002, outdir=None,
@@ -33,10 +33,9 @@ class SearchBasedDepthDiffuser:
         self.canny_max=255
         self.match_threshold_humming=300
         self.kp_pos_radius_fraction=0.0264
-        self.cbachss = 5 # Corner Based Adjacency Check Square Size
         self.spline_offset = 8
-
-        self.spline_fitter = VisualSplineFit(x_coeffs=2, degree_x=2, degree_y=2)
+        self.expansion_min_line_seg = 0.1
+        self.spline_fitter = VisSpFitsWrapper(bias=self.spline_offset)
 
         # We'll store adjacency-failure lines here
         self.adjFailurePixels = set()
@@ -444,132 +443,6 @@ class SearchBasedDepthDiffuser:
                                      cand.get("slope",-999),
                                      cand.get("metric",self.HUGE_METRIC)])
 
-    def cornerBasedAdjacencyCheck(self, masked_image):
-        """
-        For each *internal* grid node (row_node, col_node),
-        we examine the four 5x5 squares around that node:
-            top-left  => masked_image[node_y-5:node_y,   node_x-5:node_x]
-            top-right => masked_image[node_y-5:node_y,   node_x:node_x+5]
-            bot-left  => masked_image[node_y:node_y+5,   node_x-5:node_x]
-            bot-right => masked_image[node_y:node_y+5,   node_x:node_x+5]
-
-        Each square is considered "fully occupant" if it's all 255 in the masked_image.
-        If exactly one of these squares is fully 255, we find the corresponding neighbor cell
-        (top-left => cell(row_node-1, col_node-1), etc.) and perform expansions in that subregion:
-        - row expansions (top -> down, bottom -> up)
-        - column expansions (left -> right, right -> left)
-        We add all those occupant pixels to self.adjFailurePixels, but **stop expansions** if we see:
-        - masked_image == 0 (background), or
-        - self.currentTMask == 255 (some edge region).
-
-        This function is the "corner-based adjacency" check with the **new** annotation:
-        masked_image == 255 => occupant / foreground, masked_image == 0 => background.
-        """
-
-        H, W = masked_image.shape
-
-        def is_fully_white(r1, r2, c1, c2):
-            """
-            Returns True if the sub-block in [r1:r2, c1:c2] is entirely 255 in masked_image;
-            also clamps out-of-bounds. If out-of-bounds => returns False.
-            """
-            if r1<0 or c1<0 or r2>H or c2>W:
-                return False
-            block = masked_image[r1:r2, c1:c2]
-            return np.all(block == 255)
-
-        def expand_linewise(row_start, row_end, col_start, col_end, step):
-            """
-            Expand row by row (vertical) from row_start..row_end with a given step (+1 or -1).
-            We add occupant pixels (255) to self.adjFailurePixels,
-            but stop if we see masked_image==0 or self.currentTMask==255.
-            """
-            r = row_start
-            while (r < row_end if step>0 else r >= row_end):
-                row_slice = masked_image[r, col_start:col_end]
-                # if any of them == 0 => occupant region is broken => stop
-                if np.any(row_slice == 0):
-                    break
-                # if TMask has 255 => also stop
-                if np.any(self.currentTMask[r, col_start:col_end] == 255):
-                    break
-                # Mark these occupant pixels
-                for c in range(col_start, col_end):
-                    self.adjFailurePixels.add((r, c))
-                r += step
-
-        def expand_colwise(col_start, col_end, row_start, row_end, step):
-            """
-            Expand column by column (horizontal) from col_start..col_end with step (+1 or -1).
-            Stop expansions if masked_image==0 or TMask==255.
-            """
-            c = col_start
-            while (c < col_end if step>0 else c >= col_end):
-                col_slice = masked_image[row_start:row_end, c]
-                if np.any(col_slice == 0):
-                    break
-                if np.any(self.currentTMask[row_start:row_end, c] == 255):
-                    break
-                for r in range(row_start, row_end):
-                    self.adjFailurePixels.add((r, c))
-                c += step
-
-        def expand_cell_subregion(r_cell, c_cell):
-            """
-            Once we identify which cell subregion is occupant-based on the corner check,
-            we do expansions on its top, bottom, left, and right boundaries, stopping 
-            if masked_image==0 or TMask==255.
-            """
-            y1 = r_cell * self.cell_height
-            y2 = y1 + self.cell_height
-            x1 = c_cell * self.cell_width
-            x2 = x1 + self.cell_width
-            # top boundary => expand downward
-            expand_linewise(y1, y2, x1, x2, step=+1)
-            # bottom boundary => expand upward
-            expand_linewise(y2 - 1, y1 - 1, x1, x2, step=-1)
-            # left boundary => expand right
-            expand_colwise(x1, x2, y1, y2, step=+1)
-            # right boundary => expand left
-            expand_colwise(x2 - 1, x1 - 1, y1, y2, step=-1)
-
-        # We'll only iterate over *internal* grid nodes => row_node in [1..num_cells_y-1], col_node in [1..num_cells_x-1]
-        # because only those have 4 neighbor cells.
-        for row_node in range(1, self.num_cells_y):
-            node_y = row_node * self.cell_height
-            if node_y < self.cbachss or node_y > H - self.cbachss:
-                continue
-            for col_node in range(1, self.num_cells_x):
-                node_x = col_node * self.cell_width
-                if node_x < self.cbachss or node_x > W - self.cbachss:
-                    continue
-
-                # check 4 sub-block corners
-                top_left  = is_fully_white(node_y - self.cbachss, node_y, node_x - self.cbachss, node_x)
-                top_right = is_fully_white(node_y - self.cbachss, node_y, node_x, node_x + self.cbachss)
-                bot_left  = is_fully_white(node_y, node_y + self.cbachss, node_x - self.cbachss, node_x)
-                bot_right = is_fully_white(node_y, node_y + self.cbachss, node_x, node_x + self.cbachss)
-
-                num_corners = sum([top_left, top_right, bot_left, bot_right])
-                if num_corners == 1:
-                    # figure out which corner => subregion expansions
-                    if top_left:
-                        r_cell = row_node - 1
-                        c_cell = col_node - 1
-                    elif top_right:
-                        r_cell = row_node - 1
-                        c_cell = col_node
-                    elif bot_left:
-                        r_cell = row_node
-                        c_cell = col_node - 1
-                    else:  # bot_right
-                        r_cell = row_node
-                        c_cell = col_node
-
-                    if (0 <= r_cell < self.num_cells_y) and (0 <= c_cell < self.num_cells_x):
-                        expand_cell_subregion(r_cell, c_cell)
-
-
     def diffuse(self, template_mask, depth_image, depth_image_name=None):
         self.currentTMask = template_mask
         # Binarize at edge threshold
@@ -627,12 +500,12 @@ class SearchBasedDepthDiffuser:
         
         self.adjFailurePixels = set()
 
-        # 7) Save final
         _masked = apply_threshold(depth_image, combined_thresh)
 
-        self.cornerBasedAdjacencyCheck(_masked)
-
-        for (py, px) in self.adjFailurePixels:
+        self.adjFailurePixels = expand_zero_from_perfect_segments(_masked, self.currentTMask,
+                                                                  min_length_ratio=self.expansion_min_line_seg,
+                                                                  wr=self.cell_width_ratio)
+        for (px, py) in self.adjFailurePixels:
             combined_thresh[py, px] = 255
 
         final_masked = apply_threshold(depth_image, combined_thresh)
@@ -642,20 +515,19 @@ class SearchBasedDepthDiffuser:
         final_masked[edg == 255] = 255
         masked_image = np.where(final_masked == 0, depth_image, 0).astype(np.uint8)
 
-        # 3) Fit using only pixels where the binary image is 0
-        fitted_surface = self.spline_fitter.fit(masked_image, final_masked)
-        background_curve = fitted_surface + self.spline_offset
-        np.clip(background_curve, 0, 255, out=background_curve)
+        background_curve = self.spline_fitter.fit(depth_image, final_masked)
         final_subtraction = apply_threshold(depth_image, background_curve)
 
         if self.output_dir is not None:
             out_fname = os.path.join(self.output_dir, f"{os.path.splitext(os.path.basename(depth_image_name))[0]}_subtraction.jpg")
             out_fname_c = os.path.join(self.output_dir, f"{os.path.splitext(os.path.basename(depth_image_name))[0]}_bgCurve.jpg")
             out_fname_m = os.path.join(self.output_dir, f"{os.path.splitext(os.path.basename(depth_image_name))[0]}_masked.jpg")
+            out_fname_r = os.path.join(self.output_dir, f"{os.path.splitext(os.path.basename(depth_image_name))[0]}_rawMasked.jpg")
             new_masked = np.where(final_subtraction == 0, depth_image, 0).astype(np.uint8)
             cv2.imwrite(out_fname, final_subtraction)
             cv2.imwrite(out_fname_m, new_masked)
             cv2.imwrite(out_fname_c, background_curve)
-            print(f"Saved final => {out_fname_m}")
+            cv2.imwrite(out_fname_r, final_masked)
+            print(f"Saved final => {out_fname}")
         
         return final_subtraction, background_curve
