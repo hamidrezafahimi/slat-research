@@ -41,7 +41,7 @@ class VisualSplineFit:
 
         self.params_init = True
 
-    def fit(self, img_gray, bin_img):
+    def fit(self, img_gray, bin_img, do_clip=True):
         """
         For interpolation (inside the convex hull of known data) => use spline.
         For extrapolation (outside that hull) => do row-by-row linear extension.
@@ -148,7 +148,8 @@ class VisualSplineFit:
                     fitted_2d[row_i, col_j] = z_right
 
         # 4) Saturate the final fitted array to [0..255]
-        np.clip(fitted_2d, 0, 255, out=fitted_2d)
+        if do_clip:
+            np.clip(fitted_2d, 0, 255, out=fitted_2d)
 
         # 5) Compute the error map (abs difference where bin_img == 0, else 0)
         error_2d = np.zeros((self.H, self.W), dtype=np.float64)

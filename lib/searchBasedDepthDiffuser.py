@@ -519,15 +519,36 @@ class SearchBasedDepthDiffuser:
         final_subtraction = apply_threshold(depth_image, background_curve)
 
         if self.output_dir is not None:
-            out_fname = os.path.join(self.output_dir, f"{os.path.splitext(os.path.basename(depth_image_name))[0]}_subtraction.jpg")
-            out_fname_c = os.path.join(self.output_dir, f"{os.path.splitext(os.path.basename(depth_image_name))[0]}_bgCurve.jpg")
-            out_fname_m = os.path.join(self.output_dir, f"{os.path.splitext(os.path.basename(depth_image_name))[0]}_masked.jpg")
-            out_fname_r = os.path.join(self.output_dir, f"{os.path.splitext(os.path.basename(depth_image_name))[0]}_rawMasked.jpg")
+            # Extract base filename (without extension)
+            base_name = os.path.splitext(os.path.basename(depth_image_name))[0]
+
+            # Define subdirectories for each image type
+            subdirs = {
+                "subtraction": os.path.join(self.output_dir, "subtraction"),
+                "bgCurve": os.path.join(self.output_dir, "bgCurve"),
+                "masked": os.path.join(self.output_dir, "masked"),
+                "rawMasked": os.path.join(self.output_dir, "rawMasked"),
+            }
+
+            # Ensure subdirectories exist
+            for path in subdirs.values():
+                os.makedirs(path, exist_ok=True)
+
+            # Construct full output file paths
+            out_fname = os.path.join(subdirs["subtraction"], f"{base_name}.jpg")
+            out_fname_c = os.path.join(subdirs["bgCurve"], f"{base_name}.jpg")
+            out_fname_m = os.path.join(subdirs["masked"], f"{base_name}.jpg")
+            out_fname_r = os.path.join(subdirs["rawMasked"], f"{base_name}.jpg")
+
+            # Generate new masked image
             new_masked = np.where(final_subtraction == 0, depth_image, 0).astype(np.uint8)
+
+            # Save images
             cv2.imwrite(out_fname, final_subtraction)
             cv2.imwrite(out_fname_m, new_masked)
             cv2.imwrite(out_fname_c, background_curve)
             cv2.imwrite(out_fname_r, final_masked)
-            print(f"Saved final => {out_fname}")
+
+            print(f"Saved images for {base_name} - subt path: {out_fname}")
         
         return final_subtraction, background_curve

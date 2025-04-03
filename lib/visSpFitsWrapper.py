@@ -113,13 +113,12 @@ class VisSpFitsWrapper:
             vs_final = VisualSplineFit(x_coeffs=2, degree_x=2, degree_y=2)
 
             # Because the .fit(...) expects a gray image in [0..255], we clamp:
-            np.clip(final_fit, 0, 255, out=final_fit)
             piecewise_8u = final_fit.astype(np.uint8)
 
             # Now fit it. We'll assume vs_final has a standard .fit(...) that returns
             # the final surface in float64. This depends on how your VisualSplineFit is defined!
             # (If it only returns an error map, adapt accordingly.)
-            final_continuous, _ = vs_final.fit(piecewise_8u, secondPassBin)
+            final_continuous, _ = vs_final.fit(piecewise_8u, secondPassBin, do_clip=False)
 
             # Overwrite final_fit with the new continuous surface
             final_fit = final_continuous
