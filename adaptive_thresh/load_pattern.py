@@ -12,27 +12,26 @@ def apply_threshold(image, threshold_pattern, offset=0):
     return binary_output
 
 import sys
-if __name__ == "__main__":
-    # Load the depth image and the threshold pattern in grayscale
-    depth_img = cv2.imread("depth_image.jpg", cv2.IMREAD_GRAYSCALE)
-    if depth_img is None:
-        raise IOError("Could not load 'depth_image.jpg'. Check the file path.")
 
-    if len(sys.argv) < 2:
-        print("Usage: python script.py threshold_pattern")
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("Usage: python script.py depth_image threshold_pattern [offset]")
         sys.exit(1)
 
-    if len(sys.argv) == 3:
-        offset = int(sys.argv[2])
-    else:
-        offset = 0
+    depth_path = sys.argv[1]
+    threshold_path = sys.argv[2]
+    offset = int(sys.argv[3]) if len(sys.argv) > 3 else 0
 
-    threshold_path = sys.argv[1]
+    # Load the depth image and the threshold pattern in grayscale
+    depth_img = cv2.imread(depth_path, cv2.IMREAD_GRAYSCALE)
+    if depth_img is None:
+        raise IOError(f"Could not load '{depth_path}'. Check the file path.")
+
     threshold_pattern = cv2.imread(threshold_path, cv2.IMREAD_GRAYSCALE)
     if threshold_pattern is None:
-        raise IOError("Could not load 'threshold_pattern.jpg'. Check the file path.")
+        raise IOError(f"Could not load '{threshold_path}'. Check the file path.")
 
-    # If the threshold pattern size does not match the depth image, resize it.
+    # Resize threshold pattern if dimensions don't match
     if threshold_pattern.shape != depth_img.shape:
         threshold_pattern = cv2.resize(threshold_pattern, (depth_img.shape[1], depth_img.shape[0]))
 

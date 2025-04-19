@@ -20,7 +20,7 @@ with open(tilt_file, "r") as file:
 
 # Directories containing images
 directory1 = '/media/hamid/Workspace/viot3/data1005/depth'
-directory2 = '/media/hamid/Workspace/viot3/data1005/full'
+directory2 = '/media/hamid/Workspace/viot3/data1005/images'
 
 # Function to extract the numeric part of filenames for sorting
 def extract_number(filename):
@@ -91,14 +91,14 @@ with open(m_csv, "a") as m_file, open(h_csv, "a") as h_file, open(r_csv, "a") as
             
             numstr = image1_path[-12:-4]
             pat_pth = image1_path[:-12]+'pattern_'+numstr+'.jpg'
-            # cv2.imshow("f", gep_depth)
-            cv2.imwrite(pat_pth, gep_depth)
+            cv2.imshow("f", gep_depth)
+            # cv2.imwrite(pat_pth, gep_depth)
             # cv2.imshow("d", depth)
             # cv2.imshow("res", residual)
             # cv2.imshow("ddd", depth_lap)
             # cv2.imshow("mask", thresh1)
             # cv2.imshow("expanded mask", e_mask)
-            # cv2.waitKey()
+            cv2.waitKey()
             # time.sleep(100)
 
             # for c in range(depth.shape[1]):

@@ -3,25 +3,23 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import cv2 as cv
 
-def generate_unit_direction_vectors(image_width, image_height, horizontal_fov, tilt_angle=0):
+def depthImage2pointCloud(D, horizontal_fov, pitch_rad, max_dist = 256):
     """
-    Computes the unit direction vectors for each pixel in the image coordinate system,
-    with an optional tilt correction.
+    Computes the unit direction vectors for each pixel in the image coordinate system
     
     Parameters:
     - image_width (int): Width of the image in pixels.
     - image_height (int): Height of the image in pixels.
     - horizontal_fov (float): Horizontal field of view of the camera in degrees.
-    - tilt_angle (float): Tilt angle of the camera in degrees (positive looks down).
     
     Returns:
     - np.ndarray: A (H, W, 3) array where each pixel contains its unit direction vector (X, Y, Z).
     """
     # Convert angles to radians
     horizontal_fov_rad = np.radians(horizontal_fov)
-    tilt_rad = np.radians(tilt_angle)
     
     # Compute focal length using the horizontal FOV
+    image_height, image_width = D.shape
     focal_length = (image_width / 2) / np.tan(horizontal_fov_rad / 2)
     
     # Compute the intrinsic center
@@ -34,7 +32,6 @@ def generate_unit_direction_vectors(image_width, image_height, horizontal_fov, t
     # Create meshgrid for pixel coordinates
     x_grid, y_grid = np.meshgrid(x_indices, y_indices)
     
-    # Compute direction vectors
     X = (x_grid - cx) / focal_length
     Y = (y_grid - cy) / focal_length
     Z = np.ones_like(X)
@@ -44,48 +41,71 @@ def generate_unit_direction_vectors(image_width, image_height, horizontal_fov, t
     X /= norm
     Y /= norm
     Z /= norm
-    
-    # Apply tilt rotation around the X-axis
-    Y_tilted = Y * np.cos(tilt_rad) - Z * np.sin(tilt_rad)
-    Z_tilted = Y * np.sin(tilt_rad) + Z * np.cos(tilt_rad)
-    
-    # Stack into a 3D array
-    direction_vectors = np.stack((X, Y_tilted, Z_tilted), axis=-1)
-    
-    return direction_vectors
 
-# Example usage
-if __name__ == "__main__":
-    image_w, image_h = 440, 330
-    horizontal_fov = 66  # Example horizontal FOV in degrees
-    tilt_angle = -40  # Example tilt angle in degrees
-    
-    unit_vectors = generate_unit_direction_vectors(image_w, image_h, horizontal_fov, tilt_angle)
-    
-    # Generate random depth data
-    # np.random.seed(42)  # For reproducibility
-    # D = np.random.rand(image_h, image_w) * 10  # Depth values in range [0,10]
-    D = cv.imread('/media/hamid/Workspace/thing/depthpro_output.png', cv.IMREAD_GRAYSCALE)
+    direction_vectors = np.stack((X, Y, Z), axis=-1)
+
+    Ry = np.array([
+        [ 0,  0, 1],
+        [ 0,  1, 0],
+        [ -1,  0, 0]
+    ])
+
+    Rx = np.array([
+        [1,  0,  0],
+        [0,  0,  -1],
+        [0, 1,  0]
+    ])
+
+    # Combined rotation: first -90° around Z, then -90° around X
+    R = Rx @ Ry
+
+    # Apply rotation to all direction vectors
+    direction_vectors_ned = direction_vectors @ R.T # shape remains (H, W, 3)
+
+    # pitch_rad is the rotation of camera. so the point cloud must rotate in reverse angle
+    Ry = np.array([
+        [ np.cos(-pitch_rad),  0, -np.sin(-pitch_rad)],
+        [ 0,  1, 0],
+        [ np.sin(-pitch_rad),  0, np.cos(-pitch_rad)]
+    ])
+        
+    unit_vectors = direction_vectors_ned @ Ry.T
 
     # Compute point cloud
-    point_cloud = unit_vectors * D[..., np.newaxis]
-    
+    depth_meters = (255 - D) * (max_dist / 255.0)
+    return unit_vectors * depth_meters[..., np.newaxis]
+
+
+def plot_point_cloud(point_cloud):
     # Sample points for visualization
-    step = 40  # Adjust for better visualization
+    step = 20
     X_sample = point_cloud[::step, ::step, 0]
     Y_sample = point_cloud[::step, ::step, 1]
     Z_sample = point_cloud[::step, ::step, 2]
-    
+
     # Plot the point cloud
     fig = plt.figure()
     ax = fig.add_subplot(111, projection='3d')
+    ax.scatter(0, 0, 0, color='red')
     ax.plot(X_sample.flatten(), Y_sample.flatten(), Z_sample.flatten(), 'b.', markersize=1)
-    
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
     ax.set_zlabel("Z")
-    ax.set_title("3D Point Cloud from Depth Data")
+    ax.view_init(elev=-180, azim=0)
     plt.show()
+
+import sys
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python script.py depth_image.jpg")
+        sys.exit(1)
+
+    depth_path = sys.argv[1]
     
-    print("Point Cloud Shape:", point_cloud.shape)
-    print("Sample Point (center pixel):", point_cloud[image_h // 2, image_w // 2])
+    D = cv.imread(depth_path, cv.IMREAD_GRAYSCALE)
+    if D is None:
+        raise IOError(f"Could not load {depth_path}. Check the file path.")
+
+    # Example usage
+    point_cloud = depthImage2pointCloud(D, horizontal_fov=66, pitch_rad=-0.75)
+
