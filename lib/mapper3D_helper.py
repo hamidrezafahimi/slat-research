@@ -121,7 +121,7 @@ def depthImage2pointCloud(D, horizontal_fov, roll_rad, pitch_rad, yaw_rad, abs_a
         [0,  0,  -1],
         [0, 1,  0]
     ])
-    # from camera to earth
+    # from body to earth
     Rphi = rotation_matrix_x(-roll_rad)
     Rtheta = rotation_matrix_y(-pitch_rad)
     Rpsi = rotation_matrix_z(-yaw_rad)
