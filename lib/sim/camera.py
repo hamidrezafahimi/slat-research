@@ -33,12 +33,16 @@ class PinholeCamera:
         cy: float,
         image_shape: Tuple[int, int] | None = None,
         show: bool = False,
+        log: bool = False,
+        ambif: bool = True, # Determines if exception is gonna be thrown when a point out of FOV
     ) -> None:
         self.fx = float(fx)
         self.fy = float(fy)
         self.cx = float(cx)
         self.cy = float(cy)
         self.show = bool(show)
+        self.dolog = bool(log)
+        self.allMustBeInFOV = bool(ambif)
 
         # Canvas size for the live preview
         w = int(2 * self.cx) if image_shape is None else int(image_shape[0])
@@ -46,6 +50,11 @@ class PinholeCamera:
         self._canvas_size = (w, h)  # (width, height)
         # Store for bounds checking and overlay
         self.image_shape = (w, h)
+    
+    def getK(self):
+        return np.array([[self.fx, 0, self.cx],
+                         [0, self.fy, self.cy],
+                         [0,   0,   1]], float)
 
     def project(self, pts_cam: np.ndarray) -> np.ndarray:
         """Project 3‑D camera‑frame points with IDs to pixel coordinates with IDs.
@@ -78,8 +87,7 @@ class PinholeCamera:
         v = self.fy * y + self.cy
         uv_id = np.column_stack((ids, u, v))
 
-        if self.show:
-            self._show_on_canvas(uv_id)
+        self._show_on_canvas(uv_id)
 
         return uv_id
 
@@ -105,11 +113,14 @@ class PinholeCamera:
                     thickness=1,
                 )
             else:
-                print(f"[Warning] Point ID {int(pid)} at ({u_int}, {v_int}) is outside image bounds {self.image_shape}")
+                if self.allMustBeInFOV:
+                    raise ValueError(f"Point ID {int(pid)} at ({u_int}, {v_int}) is outside image bounds {self.image_shape}")
+                else:
+                    print(f"[WARNING] Point ID {int(pid)} at ({u_int}, {v_int}) is outside image bounds {self.image_shape}")
 
-        cv2.imshow("Pinhole Projection Preview", canvas)
-        cv2.waitKey(1)
-
+        if self.show:
+            cv2.imshow("Pinhole Projection Preview", canvas)
+            cv2.waitKey(1)
 
 # ====================================================================== #
 class SquaredPixelFocalCenteredPinholeCamera(PinholeCamera):
@@ -130,6 +141,8 @@ class SquaredPixelFocalCenteredPinholeCamera(PinholeCamera):
         image_shape: Tuple[int, int],
         hfov_deg: float,
         show: bool = False,
+        log: bool = False,
+        ambif: bool = True, # Determines if exception is gonna be thrown when a point out of FOV
     ) -> None:
         W, H = int(image_shape[0]), int(image_shape[1])
         hfov_rad = math.radians(float(hfov_deg))
@@ -152,6 +165,8 @@ class SquaredPixelFocalCenteredPinholeCamera(PinholeCamera):
             cy=cy,
             image_shape=(W, H),
             show=show,
+            log=log,
+            ambif=ambif
         )
 
     def __repr__(self) -> str:
