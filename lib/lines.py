@@ -121,7 +121,8 @@ def calcFlatGroundDepth(tilt_angle, h=10, vertical_fov_degrees=0.75*66.0, horizo
     dimg = (1 - depth_data / max_depth)
     dimg = dimg - dimg.min()  # Shift the values so the minimum is 0
 
-    return (255 * dimg).astype(np.uint8)
+    return 255.0 * dimg
+    # return (255 * dimg).astype(np.uint8)
 
 
 # if __name__ == '__main__':

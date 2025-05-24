@@ -8,3 +8,6 @@ output/
 data/
 *.jpeg
 *.json
+*.npy
+*.csv
+*.zip
