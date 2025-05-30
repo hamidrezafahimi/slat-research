@@ -15,8 +15,6 @@ from mpl_toolkits.mplot3d import Axes3D
 
 import json
 
-from cam_traj import generate_chess_points, cameras_around_chess
-
 
 def load_scene(json_path):
     with open(json_path, "r") as f:

@@ -21,6 +21,7 @@ def set_axes_equal(ax):
     ax.set_ylim3d([y_middle - max_range / 2, y_middle + max_range / 2])
     ax.set_zlim3d([z_middle - max_range / 2, z_middle + max_range / 2])
 
+
 def plot_3d_kps(pts_nwu, title, ax=None, pts_color = 'red', 
     camera_trajectory=None, plt_pause=0, plt_show=False, cla=False, write_id=False, label=''):
     if ax is None:
@@ -34,7 +35,7 @@ def plot_3d_kps(pts_nwu, title, ax=None, pts_color = 'red',
         label=label)
     if write_id:
         for pt in pts_nwu:
-            ax1.text(*pt[1:], f'N{pt[0]}', color=pts_color)
+            ax1.text(*pt[1:], f'{int(pt[0])}', color=pts_color)
 
     if not camera_trajectory is None:
         ax1.plot(camera_trajectory[:, 0], camera_trajectory[:, 1], camera_trajectory[:, 2], 
@@ -52,6 +53,7 @@ def plot_3d_kps(pts_nwu, title, ax=None, pts_color = 'red',
         plt.pause(plt_pause)
     if plt_show:
         plt.show()
+
 
 def get_new_ax3d():
     fig1 = plt.figure()

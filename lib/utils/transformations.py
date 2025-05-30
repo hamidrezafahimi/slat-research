@@ -36,6 +36,12 @@ def transform_kps_nwu2camera(points, cam_pose, roll, pitch, yaw):
     xyx_transformed = transform_nwu_to_camera(xyz, cam_pose, roll, pitch, yaw)
     return np.hstack([ids, xyx_transformed])
 
+def transform_kps_camera2nwu(points, cam_pose, roll, pitch, yaw):
+    ids = points[:,0:1]
+    xyz = points[:,1:4]
+    xyx_transformed = transform_camera_to_nwu(xyz, cam_pose, roll, pitch, yaw)
+    return np.hstack([ids, xyx_transformed])
+
 def transform_nwu_to_camera(points, cam_pose, roll, pitch, yaw):
     points_translated = points - cam_pose
 
@@ -50,3 +56,18 @@ def transform_nwu_to_camera(points, cam_pose, roll, pitch, yaw):
     points_out = points_translated @ R.T
     return points_out
     # return points_out - cam_pose
+
+def transform_camera_to_nwu(points, cam_pose, roll, pitch, yaw):
+    points_translated = points + cam_pose
+
+    R1 = rotation_matrix_x(np.pi)
+    Rpsi = rotation_matrix_z(yaw)
+    Rtheta = rotation_matrix_y(pitch)
+    Rphi = rotation_matrix_x(roll)
+    R5 = rotation_matrix_x(np.pi/2)
+    R6 = rotation_matrix_y(np.pi/2)
+
+    R = R1 @ Rpsi @ Rtheta @ Rphi @ R5 @ R6
+    # points_out = points @ R.T
+    points_out = points_translated @ R.T
+    return points_out
