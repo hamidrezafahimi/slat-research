@@ -1,44 +1,81 @@
 import numpy as np
+from mpl_toolkits.mplot3d import Axes3D
+from scipy.interpolate import interp2d, griddata
+import matplotlib.pyplot as plt
 
-def transform_depth(depth_image, bg_image, pitch):
-    # Compute ground elevation profile
-    gep_f = _calc_ground_depth(66.0, pitch_rad=pitch, output_shape=depth_image.shape)
-
-    # Convert images to float32
-    depth_f = depth_image.astype(np.float32)
-    bg_f = bg_image.astype(np.float32)
-
+def transform_depth(depth_image, bg_image, gep_image):
+    assert depth_image.dtype == np.float32 and bg_image.dtype == np.float32 and \
+        gep_image.dtype == np.float32
     # Transformation
-    trns = gep_f / np.where(bg_f != 0, bg_f, 0.01)
-    final_f = trns * depth_f
-    final_f = np.minimum(final_f, gep_f)
-    return final_f, gep_f
+    trns = gep_image / np.where(bg_image != 0, bg_image, 0.01)
+    final_f = trns * depth_image
+    final_f = np.minimum(final_f, gep_image)
+    return final_f
 
-def move_depth(depth_image, bg_image, pitch):
-    gep_f = _calc_ground_depth(66.0, pitch_rad=pitch, output_shape=depth_image.shape)
-    # Convert to float32
-    depth_f = depth_image.astype(np.float32)
-    bg_f = bg_image.astype(np.float32)
-    # gep_f = gep_depth.astype(np.float32)
-    # Compute how much closer foreground is, in original image
-    fg_f = depth_f - bg_f
-    # np.clip(fg_f, 0, 255, out=fg_f)
+def arg_min_2d(arr):
+    amin = np.argmin(arr)
+    w = arr.shape[1]
+    return (int(np.floor(amin / w)), (amin + 1) % w - 1)
 
-    # Apply same ratio to refined background to get final proximity
-    final_f = gep_f + fg_f
-    np.clip(final_f, 0, 255, out=final_f)
-    # maxval = np.max(final_f)
-    # if maxval > 255.0:
-    #     final_f *= (255.0 / maxval)
-    # fg_i = depth_image - bg_image
-    # final_i = gep_f.astype(np.uint8) + np.where(fg_i > 0, fg_i, 0)
-    if np.min(final_f) < 0:
-        print(np.min(final_f))
-        raise ValueError("Non-logical ratio calculation")
+def arg_max_2d(arr):
+    am = np.argmax(arr)
+    w = arr.shape[1]
+    return (int(np.floor(am / w)), (am + 1) % w - 1)
 
-    final_f = np.minimum(final_f, gep_f)
-    # final_image = final_f.astype(np.uint8)
-    return final_f, gep_f
+
+def move_depth(depth_image, bg_image, gep_image):
+    assert depth_image.dtype == np.float32 and bg_image.dtype == np.float32 and \
+        gep_image.dtype == np.float32
+    relative_depth_before = depth_image / bg_image
+
+    # Convert depth data into proximity data
+    proximity_image = 255.0 - depth_image
+    bg_prox = 255.0 - bg_image
+    gep_prox = 255.0 - gep_image
+
+    # Extract foreground
+    fg_prox = proximity_image - bg_prox
+    # assert np.all(fg_prox >= 0)
+
+    # Rescale foreground objects
+    # 1. No rescaling
+    # r = 1
+    # 2. Rescaling based on relative depth
+    # r = gep_image[min_depth_index] * (1 - relative_depth_before[min_depth_index]) / fg_prox[min_depth_index]
+    # 3. Rescaling based on relative proximity
+    # r = (gep_prox[min_depth_index] * (1 - relative_prox_before[min_depth_index])) / \
+    #       (fg_prox[min_depth_index] * relative_prox_before[min_depth_index])
+    # fg_prox_scaled = fg_prox * r
+    r = np.where(fg_prox != 0, gep_image * (1 - relative_depth_before) / fg_prox, 0.0)
+    fg_prox_scaled = fg_prox * r
+
+    # Replace old background with new background
+    # 1. main functionality
+    moved_prox = fg_prox_scaled + gep_prox
+    # np.savetxt('/home/hamid/gep_prox.csv', gep_prox, delimiter=',')
+    # np.savetxt('/home/hamid/fg_prox_scaled.csv', fg_prox_scaled, delimiter=',')
+    # np.savetxt('/home/hamid/bg_prox.csv', bg_prox, delimiter=',')
+    # np.savetxt('/home/hamid/proximity_image.csv', proximity_image, delimiter=',')
+    # 2. No background
+    # moved_prox = fg_prox_scaled
+    # 3. No rescaling
+    # moved_prox = fg_prox_scaled + bg_prox
+
+    # Check
+    # relative_prox_before = bg_prox / proximity_image
+    # relative_prox_after = gep_prox / moved_prox
+    # relative_depth_before = depth_image / gep_image
+    # relative_depth_after = moved_depth / gep_image
+    # print(relative_depth_before[min_depth_index], relative_depth_after[min_depth_index])
+    # print(relative_prox_before[min_depth_index], relative_prox_after[min_depth_index])
+
+    assert np.max(moved_prox) < 255.0 and np.min(moved_prox) >= 0.0,\
+        f"min: {np.min(moved_prox):.2f}, max: {np.max(moved_prox):.2f}"
+    moved_depth = 255.0 - moved_prox
+    print(depth_image[33,416], bg_image[33,416], moved_depth[33,416], gep_image[33,416])
+    print(gep_image[0,416], gep_image[175,416], bg_image[0,416], bg_image[175,416])
+    return moved_depth
+
 
 def rotation_matrix_x(phi):
     """Rotation about x-axis."""
@@ -70,182 +107,147 @@ def rotation_matrix_z(psi):
         [0, 0, 1]
     ])
 
-def depthImage2pointCloud(D, horizontal_fov, roll_rad, pitch_rad, yaw_rad, abs_alt=0, alt_scale=1):
+def depthImage2pointCloud(D,
+                          horizontal_fov,
+                          roll_rad,
+                          pitch_rad,
+                          yaw_rad,
+                          scale_factor = None,
+                          abs_alt=0,
+                          mask=None):
     """
-    Computes the unit direction vectors for each pixel in the image coordinate system
-    
+    Computes a point cloud from a depth image with optional masking.
+
     Parameters:
-    - image_width (int): Width of the image in pixels.
-    - image_height (int): Height of the image in pixels.
-    - horizontal_fov (float): Horizontal field of view of the camera in degrees.
-    
+    - D (H, W): Depth image (in meters).
+    - horizontal_fov (float): Horizontal field of view in degrees.
+    - roll_rad, pitch_rad, yaw_rad (float): Orientation angles in radians.
+    - abs_alt (float): Altitude offset to add to the Z coordinate.
+    - mask (H, W) optional: Binary mask (0 or 255). If a pixel's mask value is 0, its Z coordinate is forced to 0.
+
     Returns:
-    - np.ndarray: A (H, W, 3) array where each pixel contains its unit direction vector (X, Y, Z).
+    - pc (H, W, 3): Point cloud in NWU coordinates with masking applied.
     """
-    # Convert angles to radians
-    horizontal_fov_rad = np.radians(horizontal_fov)
-    # Compute focal length using the horizontal FOV
-    image_height, image_width = D.shape
-    focal_length = (image_width / 2) / np.tan(horizontal_fov_rad / 2)
-    
-    # Compute the intrinsic center
-    cx, cy = image_width / 2, image_height / 2
-    
-    # Create a grid of pixel coordinates
-    x_indices = np.arange(image_width)
-    y_indices = np.arange(image_height)
-    
-    # Create meshgrid for pixel coordinates
-    x_grid, y_grid = np.meshgrid(x_indices, y_indices)
-    
+    # # Prepare mask: default all valid
+    if mask is None:
+        mask = np.full((D.shape[0], D.shape[1]), 255, dtype=np.uint8)
+    else:
+        mask = mask.astype(np.uint8)
+        unique_vals = np.unique(mask)
+        assert set(unique_vals).issubset({0, 255}), "binary mask should only have 0 or 255"
+
+    # Convert horizontal FOV to radians and compute focal length
+    hfov_rad = np.radians(horizontal_fov)
+    H, W = D.shape
+    focal_length = (W / 2) / np.tan(hfov_rad / 2)
+    cx, cy = W / 2, H / 2
+
+    # Generate direction vectors in camera frame
+    x_idxs = np.arange(W)
+    y_idxs = np.arange(H)
+    x_grid, y_grid = np.meshgrid(x_idxs, y_idxs)
     X = (x_grid - cx) / focal_length
     Y = (y_grid - cy) / focal_length
     Z = np.ones_like(X)
-    
-    # Normalize to unit vectors
     norm = np.sqrt(X**2 + Y**2 + Z**2)
-    X /= norm
-    Y /= norm
-    Z /= norm
+    X /= norm; Y /= norm; Z /= norm
+    dirs = np.stack((X, Y, Z), axis=-1)  # (H, W, 3)
 
-    direction_vectors = np.stack((X, Y, Z), axis=-1)
-
-    # from camera to body
-    Ry = np.array([
-        [ 0,  0, 1],
-        [ 0,  1, 0],
-        [ -1,  0, 0]
-    ])
-    Rx = np.array([
-        [1,  0,  0],
-        [0,  0,  -1],
-        [0, 1,  0]
-    ])
-    # from body to earth
-    Rphi = rotation_matrix_x(-roll_rad)
+    # Camera-to-body and body-to-earth rotations
+    Ry = np.array([[ 0,  0, 1], [0, 1, 0], [-1, 0, 0]])
+    Rx = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
+    Rphi   = rotation_matrix_x(-roll_rad)
     Rtheta = rotation_matrix_y(-pitch_rad)
-    Rpsi = rotation_matrix_z(-yaw_rad)
-    Rnwu = rotation_matrix_x(np.pi)
-
+    Rpsi   = rotation_matrix_z(-yaw_rad)
+    Rnwu   = rotation_matrix_x(np.pi)
     R = Rnwu @ Rpsi @ Rtheta @ Rphi @ Rx @ Ry
-    # Apply rotation to all direction vectors
-    direction_vectors_nwu = direction_vectors @ R.T # shape remains (H, W, 3)
-    return (direction_vectors_nwu * D[..., np.newaxis] * alt_scale) + np.array([0,0,abs_alt])
 
-def _calc_ground_depth(hfov_degs, 
-                      pitch_rad, 
-                      fixed_alt=10.0, 
-                      output_shape=(480, 640), 
-                      max_dist=255.0):
+    # Rotate direction vectors into NWU frame
+    dirs_nwu = dirs @ R.T
+
+    # Scale by depth and altitude
+    pc1 = dirs_nwu * (D[..., np.newaxis])
+
+    if scale_factor is None:
+        scale_factor = np.ones_like(D)
+
+    D2 = D * scale_factor
+    pc1 = dirs_nwu * (D2[..., np.newaxis])
+    np.savetxt('/home/hamid/asdf.csv', pc1[:,:,2], delimiter=',')
+    return pc1
+
+
+def calc_ground_depth(hfov_degs,
+                      pitch_rad,
+                      output_shape,
+                      fixed_alt=10.0,
+                      horizon_pitch_rad=-0.034):
     """
-    Computes a synthetic "ground depth" image for a camera at (0,0,-fixed_alt) in NED
-    with a pitch of `pitch_rad`, such that passing this depth image into `depthImage2pointCloud`
-    yields 3D points all on the z=0 plane.
+    Returns a float32 image whose pixel intensities encode
+        C · metric_distance_to_ground    0 ≤ value ≤ 255
 
-    The returned depth image is float-valued in [0..255], with 0 corresponding to the
-    maximum distance (max_dist) and 255 corresponding to zero distance from the camera.
-
-    Parameters
-    ----------
-    hfov_degs : float
-        Horizontal field of view of the camera in degrees.
-    pitch_rad : float
-        The camera's pitch (rotation about Y), in radians. Negative pitch typically means
-        looking downward, depending on your convention.
-    fixed_alt : float, optional
-        The altitude of the camera above the z=0 plane, defaults to 1.
-    output_shape : (int, int), optional
-        (height, width) of the output depth image.
-    max_dist : float, optional
-        The maximum distance we allow in the synthetic depth map. Default is 256.
-
-    Returns
-    -------
-    D_float : np.ndarray of shape (H, W), dtype float32
-        A 2D array whose values lie in [0.0 .. 255.0]. 
-        0.0 => farthest visible ground point (max_dist).
-        255.0 => zero distance from camera (directly under the camera if looking down).
-        If you feed this into `depthImage2pointCloud(D_float, hfov_degs, pitch_rad, max_dist)`,
-        you get points on z=0.
+    C is chosen so that the farthest *ground* distance visible in
+    the image is mapped to exactly 255.  Rays that never intersect
+    the ground, or whose pitch > horizon_pitch_rad, are forced to 255.
     """
-    image_height, image_width = output_shape
+    H, W = output_shape
 
-    # Convert horizontal FOV to radians
-    hfov_rad = np.radians(hfov_degs)
+    # --- 1) intrinsics ------------------------------------------------
+    f  = (W / 2) / np.tan(np.radians(hfov_degs) / 2)
+    cx, cy = W / 2.0, H / 2.0
 
-    # Match the focal length logic from depthImage2pointCloud
-    focal_length = (image_width / 2) / np.tan(hfov_rad / 2)
-
-    # Intrinsic center
-    cx, cy = image_width / 2.0, image_height / 2.0
-
-    # Create meshgrid for pixel coordinates
-    x_indices = np.arange(image_width)
-    y_indices = np.arange(image_height)
-    x_grid, y_grid = np.meshgrid(x_indices, y_indices)
-
-    # -- 1) Compute camera-frame unit directions (same as depthImage2pointCloud) --
-    X = (x_grid - cx) / focal_length
-    Y = (y_grid - cy) / focal_length
+    # --- 2) unit rays in camera coords --------------------------------
+    xg, yg = np.meshgrid(np.arange(W), np.arange(H))
+    X = (xg - cx) / f
+    Y = (yg - cy) / f
     Z = np.ones_like(X)
-
-    # Normalize
     norm = np.sqrt(X**2 + Y**2 + Z**2)
-    X /= norm
-    Y /= norm
-    Z /= norm
+    dirs_cam = np.stack([X / norm, Y / norm, Z / norm], axis=-1)
 
-    direction_vectors = np.stack([X, Y, Z], axis=-1)
+    # --- 3) camera  ->  NED -------------------------------------------
+    Ry90neg = np.array([[ 0, 0, 1],
+                        [ 0, 1, 0],
+                        [-1, 0, 0]])
+    Rx90neg = np.array([[1, 0,  0],
+                        [0, 0, -1],
+                        [0, 1,  0]])
+    dirs_ned = dirs_cam @ (Rx90neg @ Ry90neg).T
 
-    # -- 2) Apply the same camera->NED rotation used in depthImage2pointCloud --
-    # R_cam_to_ned = Rx(-90°) @ Rz(-90°) in your original code
-    Ry_90neg = np.array([
-        [ 0,  0,  1],
-        [ 0,  1,  0],
-        [-1,  0,  0]
-    ])
-    Rx_90neg = np.array([
-        [ 1,  0,  0],
-        [ 0,  0, -1],
-        [ 0,  1,  0]
-    ])
-    R_cam_to_ned = Rx_90neg @ Ry_90neg
+    # --- 4) apply camera pitch about +Y in NED ------------------------
+    Ry = np.array([[ np.cos(-pitch_rad), 0, -np.sin(-pitch_rad)],
+                   [ 0,                  1,  0               ],
+                   [ np.sin(-pitch_rad), 0,  np.cos(-pitch_rad)]])
+    dirs = dirs_ned @ Ry.T                     # final unit directions
 
-    direction_vectors_ned = direction_vectors @ R_cam_to_ned.T
+    # --- 5) ray pitch angle & ground intersection --------------------
+    horiz_len     = np.linalg.norm(dirs[..., :2], axis=-1)
+    pitch_angle   = np.arctan2(-dirs[..., 2], horiz_len)   # +ve up, –ve down
+    dir_z         = dirs[..., 2]                           # downward component
 
-    # -- 3) Apply the -pitch rotation about Y (as in depthImage2pointCloud) --
-    Ry_pitch = np.array([
-        [ np.cos(-pitch_rad),  0, -np.sin(-pitch_rad)],
-        [ 0,                   1,  0],
-        [ np.sin(-pitch_rad),  0,  np.cos(-pitch_rad)]
-    ])
-    final_dirs = direction_vectors_ned @ Ry_pitch.T
+    eps           = 1e-12
+    distance_raw  = np.where(dir_z > eps,                 # t = alt / dir_z
+                             fixed_alt / dir_z,
+                             np.inf).astype(np.float32)
 
-    # -- 4) Intersect each ray with ground plane z=0, from camera at (0,0,-fixed_alt) --
-    dir_z = final_dirs[..., 2]
-    eps = 1e-12
-    # t is how far along the ray we go to hit z=0
-    # camera_pos_z + t*dir_z = 0 => -fixed_alt + t*dir_z = 0 => t = fixed_alt / dir_z
-    # only valid if dir_z>0
-    t = np.where(dir_z > eps, fixed_alt / dir_z, np.inf)
-    distances = t.astype(np.float32)
+    # --- 6) classify pixels ------------------------------------------
+    sky_mask      = (pitch_angle > horizon_pitch_rad) | ~np.isfinite(distance_raw)
+    ground_mask   = ~sky_mask                            # valid finite hits
 
-    # Check basic statistics
-    min_dist = np.min(distances)
-    max_dist = np.max(distances)
+    if not np.any(ground_mask):
+        raise RuntimeError("Camera sees no ground below the horizon!")
 
-    # Map distances (0 to max_dist) -> (255.0 -> 0.0) in float
-    # Formula: mapped_value = 255.0 * (1 - distance / max_dist)
-    mapped_distances = 255.0 * (1.0 - distances / max_dist)
+    d_max         = distance_raw[ground_mask].max()      # farthest ground distance
+    scale         = 255.0 / d_max                        # C  so that d_max→255
 
-    # Clip to make sure no values go outside 0-255
-    D_float = np.clip(mapped_distances, 0.0, 255.0)
-    D_int = D_float.astype(np.uint8)
-    # cv2.imshow("gep depth", D_int)
-    return 255 - D_float
+    # --- 7) build output image ---------------------------------------
+    depth_img     = np.full((H, W), 255.0, dtype=np.float32)    # start with sky
+    depth_img[ground_mask] = distance_raw[ground_mask] * scale
+    depth_img     = np.minimum(depth_img, 255.0)                # clamp just in case
+
+    return depth_img
 
 def rescale_depth(depth_image, bg_image, pitch):
-    gep_f = _calc_ground_depth(66.0, pitch_rad=pitch, output_shape=depth_image.shape)
+    gep_f = calc_ground_depth(66.0, pitch_rad=pitch, output_shape=depth_image.shape)
     # Convert to float32
     depth_f = depth_image.astype(np.float32)
     bg_f = bg_image.astype(np.float32)
@@ -268,6 +270,63 @@ def rescale_depth(depth_image, bg_image, pitch):
     final_f = gep_f + fg_new_f
     if np.min(final_f) < 0 or np.max(final_f) > 255.0:
         raise ValueError("Non-logical ratio calculation")
-
     return final_f, gep_f
 
+def unified_scale(foreground: np.ndarray, background: np.ndarray):
+    min_fg = np.min(foreground)
+    max_bg = np.max(background)
+
+    assert min_fg <= np.min(background), "Foreground must contain the global minimum"
+    print(max_bg, np.max(foreground))
+    assert max_bg >= np.max(foreground), "Background must contain the global maximum"
+
+    fg_flat = foreground.flatten()
+    bg_flat = background.flatten()
+
+    combined = np.concatenate([fg_flat, bg_flat])
+    max_val = np.max(combined)
+
+    if max_val == 0:
+        raise ValueError("Maximum value is zero; cannot scale.")
+
+    scaled_combined = combined * 255.0 / max_val
+
+    # Split back
+    fg_scaled = scaled_combined[:fg_flat.size].reshape(foreground.shape)
+    bg_scaled = scaled_combined[fg_flat.size:].reshape(background.shape)
+
+    return fg_scaled, bg_scaled
+
+def interp_2d(metric_depth, mask, plot=False):
+
+    mask_bool = np.where(mask > 127, False, True)
+
+    Z_masked = np.where(mask_bool, metric_depth, np.nan) # Replace masked values with NaN
+
+    x_coords = np.linspace(0, mask.shape[1], mask.shape[1])
+    y_coords = np.linspace(0, mask.shape[0], mask.shape[0])
+    X_orig, Y_orig = np.meshgrid(x_coords, y_coords)
+
+    valids = ~np.isnan(Z_masked)
+
+    x_s = X_orig[valids]
+    y_s = Y_orig[valids]
+    z_s = metric_depth[valids]
+
+    xi, yi = np.meshgrid(np.linspace(0, mask.shape[1], mask.shape[1]), np.linspace(0, mask.shape[0], mask.shape[0]))
+
+    # # 'kind' can be 'linear', 'cubic', or 'quintic'
+    zi = griddata((x_s,y_s), z_s, (xi, yi), method='linear')
+
+    if plot:
+        fig = plt.figure(figsize=(10, 5))
+
+        ax1 = fig.add_subplot(111, projection='3d')
+        ax1.plot_surface(xi, yi, zi, cmap='viridis')
+        # ax1.plot_surface(X_orig, Y_orig, Z_masked, cmap='viridis')
+        # print(x_coords.shape, y_coords.shape, Z_masked.shape)
+
+        plt.tight_layout()
+        plt.show()
+    
+    return zi

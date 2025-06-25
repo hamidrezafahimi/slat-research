@@ -1,2 +1,7 @@
 
-[![GT generation](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/hamidrezafahimi/depth_pattern_analysis/blob/main/launch/notebook/generate_ground_truth.ipynb)
+```bash
+
+cd launch/local
+
+python3 map3d_img_simple2.py ../../data/274/asfd.csv ../../data/274/pattern.csv ../../data/274/pattern.png ../../data/274/fasdfdf.png ../../data/274/mask.png
+```

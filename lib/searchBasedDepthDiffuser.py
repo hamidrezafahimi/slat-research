@@ -7,7 +7,7 @@ from searchBasedDepthDiffuser_helper import *
 from visSpFitsWrapper import VisSpFitsWrapper
 
 class SearchBasedDepthDiffuser:
-    def __init__(self, glob_step=3, cell_w_r=0.2, occupied_cell_fraction=0.002, outdir=None,
+    def __init__(self, glob_step=3, cell_w_r=0.07, occupied_cell_fraction=0.002, outdir=None,
                  imwrite_global=False, imwrite_local=False, 
                  log_all=False, log_global=False, log_local=False):
         self.HUGE_METRIC = 1e9
@@ -101,7 +101,6 @@ class SearchBasedDepthDiffuser:
             return self.HUGE_METRIC, None, None, None
         else:
             return (1.0 / len(good_matches)), good_match_coords, matched_image, detected_edges
-
 
     def compute_threshold_pattern(self, image_shape, bottom_threshold, slope):
         H, W = image_shape

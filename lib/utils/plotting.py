@@ -22,7 +22,7 @@ def set_axes_equal(ax):
     ax.set_zlim3d([z_middle - max_range / 2, z_middle + max_range / 2])
 
 
-def plot_3d_kps(pts_nwu, title, ax=None, pts_color = 'red', 
+def plot_3d_kps(pts_nwu, title="", ax=None, pts_color = 'red', 
     camera_trajectory=None, plt_pause=0, plt_show=False, cla=False, write_id=False, label=''):
     if ax is None:
         ax1 = get_new_ax3d()

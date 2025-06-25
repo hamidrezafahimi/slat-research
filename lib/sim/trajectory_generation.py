@@ -125,17 +125,17 @@ def _greedy_nearest_order(poses_xyz: np.ndarray) -> list[int]:
     return order
 
 def get_cam_trajectory(
-    cam: "SimpleCamera",
-    box: "Box",
-    *,
-    N: int,
-    D: float | None = None,
-    step_size: float | None = None,
-    max_trials: int = 2_000,
-    log_every: int | None = None,
-    smooth: bool = False,
-    smooth_upsample: int | None = None,
-) -> np.ndarray:
+        cam: "SimpleCamera",
+        box: "Box",
+        *,
+        N: int,
+        D: float | None = None,
+        step_size: float | None = None,
+        max_trials: int = 2_000,
+        log_every: int | None = None,
+        smooth: bool = False,
+        smooth_upsample: int | None = None,
+    ) -> np.ndarray:
     """
     Generate **N** camera poses that all keep the whole ``box`` inside the
     field-of-view, *never* go **closer** to the box than the very first pose,

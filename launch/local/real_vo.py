@@ -102,14 +102,18 @@ if __name__ == '__main__':
     for frame_data in data:
         frame_index = frame_data["frame"]
         keypoints = frame_data["keypoints"]
+        print("processing frame", frame_index)
 
         # Extract UVs
         uvs = np.array([[kp[0], kp[1], kp[2]] for kp in keypoints])  # Ignore the keypoint index (kp[0])
 
-        print(uvs.shape)
-        pts_vo = vo.do_vo(uvs)
+        if uvs.shape[0] == 0:
+            break
 
-        if k > 0:
+        pts_vo = vo.do_vo(uvs)
+        print(pts_vo.shape)
+
+        if pts_vo.shape[0] != 0:
             pts_nwu = transform_kps_camera2nwu(pts_vo, np.array([0,0,0]), 0, -0.78, -3.14)
             # Example plotting (update with real 3D plotting if needed)
             plot_3d_kps(pts_nwu, ax=ax, pts_color='green', label=f'vo{k}', 
@@ -126,8 +130,25 @@ if __name__ == '__main__':
                 title=f'VO Output Frame {k}', plt_show=True, write_id=True, cla=True)
     
     img = render_depth_circles(uvs, pts_vo, 440, 330, 5)
-    cv2.imshow("img", img)
+    # cv2.imshow("img", img)
     cv2.imwrite("vo_out.png", img)
-    cv2.waitKey()
 
-    cv2.destroyAllWindows()
+    import json
+
+    # Convert arrays to lists with IDs
+    output_vo = pts_vo.tolist() if pts_vo is not None else []
+    output_nwu = pts_nwu.tolist() if 'pts_nwu' in locals() else []
+
+    # Wrap into a dictionary
+    output_dict = {
+        "pts_vo": output_vo,     # shape: (N, 4) → [[id, x, y, z], ...]
+        "pts_nwu": output_nwu    # shape: (N, 4) → [[id, x, y, z], ...]
+    }
+
+    # Save to JSON
+    with open("vo_output.json", "w") as f_out:
+        json.dump(output_dict, f_out, indent=2)
+    print("Saved VO output to vo_output.json")
+    # cv2.waitKey()
+
+    # cv2.destroyAllWindows()

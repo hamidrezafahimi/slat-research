@@ -1,161 +1,302 @@
+# camera.py  ────────────────────────────────────────────────────────────────
+"""
+Ideal pin-hole camera with
+
+  • *Gaussian pixel noise* set **as a % of the image diagonal**,  
+  • dual preview of ideal vs noisy projections (`show_noise=True`), and  
+  • per-call report of the **average key-point displacement** expressed both
+    in pixels *and* as a % of the image diagonal.
+
+The normalisation follows
+
+    normalized [%] = (value / image_diagonal) × 100
+"""
+
+from __future__ import annotations
+
 import math
-from typing import Tuple
+from typing import Dict, Tuple
 
 import cv2
 import numpy as np
 
 
+# ========================================================================= #
+#  core class
+# ========================================================================= #
 class PinholeCamera:
     """
-    Ideal pinhole‑camera model (no lens distortion) with optional on‑screen preview.
-
-    Points and projections include a unique identifier per point.
+    Ideal pin-hole camera (no lens distortion).
 
     Parameters
     ----------
     fx, fy : float
         Focal lengths in **pixels**.
     cx, cy : float
-        Principal‑point coordinates in **pixels**.
-    image_shape : tuple (width, height), optional
-        Size of the preview canvas.  If omitted a canvas of
-        ``(int(2*cx), int(2*cy))`` is created.
-    show : bool, default False
-        If ``True``, every call to :py:meth:`project` pops up a window
-        showing the projected points and their IDs.
+        Principal point in **pixels**.
+    image_shape : (W, H), default ``(2*cx, 2*cy)``
+        Canvas for preview and FOV checks.
+    show : bool, default ``False``
+        Show a live OpenCV window (“Pinhole Projection”).
+    log : bool, default ``False``
+        Print warnings (instead of raising) when points leave the FOV while
+        ``ambif`` is *False*.
+    ambif : bool, default ``True``
+        If *True* (“all must be in FOV”) ⇒ raise on out-of-FOV;  
+        if *False* ⇒ warn or stay silent.
+    noise_std : float | (float, float), default ``0.0``
+        **Percentage of the image diagonal** (0 – 100) used as the *σ* of the
+        zero-mean Gaussian noise on *(u,v)*.  
+        Scalar ⇒ isotropic noise; pair ⇒ anisotropic (σu, σv).  
+        ``0`` ➜ deterministic projection.
+    show_noise : bool, default ``False``
+        If *True* (and ``show`` is *True*) draw ideal & noisy points with a
+        connecting line.  If *False*, draw only the noisy points.
+    report_disp : bool, default ``False``
+        After the first call, print  
+
+            Average displacement : d_norm [%] (d_px px, N pts)
+
+        where ``d_norm`` is normalised to the image diagonal.
+    rng : None | int | np.random.Generator, default ``None``
+        RNG for sampling the noise.
     """
 
+    # ------------------------------------------------------------------ #
+    #  constructor
+    # ------------------------------------------------------------------ #
     def __init__(
         self,
         fx: float,
         fy: float,
         cx: float,
         cy: float,
+        *,
         image_shape: Tuple[int, int] | None = None,
         show: bool = False,
         log: bool = False,
-        ambif: bool = True, # Determines if exception is gonna be thrown when a point out of FOV
+        ambif: bool = True,
+        noise_std: float | Tuple[float, float] = 0.0,
+        show_noise: bool = False,
+        report_disp: bool = False,
+        rng: int | np.random.Generator | None = None,
     ) -> None:
-        self.fx = float(fx)
-        self.fy = float(fy)
-        self.cx = float(cx)
-        self.cy = float(cy)
+        # — intrinsics —
+        self.fx, self.fy = float(fx), float(fy)
+        self.cx, self.cy = float(cx), float(cy)
+
+        # — behaviour flags —
         self.show = bool(show)
         self.dolog = bool(log)
         self.allMustBeInFOV = bool(ambif)
+        self.show_noise = bool(show_noise)
+        self.report_disp = bool(report_disp)
 
-        # Canvas size for the live preview
+        # — preview canvas —
         w = int(2 * self.cx) if image_shape is None else int(image_shape[0])
         h = int(2 * self.cy) if image_shape is None else int(image_shape[1])
-        self._canvas_size = (w, h)  # (width, height)
-        # Store for bounds checking and overlay
-        self.image_shape = (w, h)
-    
-    def getK(self):
-        return np.array([[self.fx, 0, self.cx],
-                         [0, self.fy, self.cy],
-                         [0,   0,   1]], float)
+        self.image_shape = (w, h)               # (width, height)
+        self.image_diag = math.hypot(w, h)      # for normalisation
+
+        # — noise model: input given in % of diag ⇒ convert to px —
+        if isinstance(noise_std, (tuple, list, np.ndarray)):
+            if len(noise_std) != 2:
+                raise ValueError("noise_std tuple must be (σ_u_pct, σ_v_pct)")
+            self.noise_u_pct, self.noise_v_pct = map(float, noise_std)
+        else:
+            self.noise_u_pct = self.noise_v_pct = float(noise_std)
+
+        self.noise_u = (self.noise_u_pct / 100.0) * self.image_diag
+        self.noise_v = (self.noise_v_pct / 100.0) * self.image_diag
+
+        self._rng = (
+            rng
+            if isinstance(rng, np.random.Generator)
+            else np.random.default_rng(rng)
+        )
+
+        # — storage for displacement reporting —
+        self._prev_uv: Dict[int, Tuple[float, float]] | None = None
+        self.mean_pct = 0
+
+    # ------------------------------------------------------------------ #
+    #  public helpers
+    # ------------------------------------------------------------------ #
+    def getK(self) -> np.ndarray:
+        """Return the 3 × 3 intrinsic matrix."""
+        return np.array(
+            [[self.fx, 0, self.cx],
+             [0, self.fy, self.cy],
+             [0,     0,     1]],
+            float,
+        )
 
     def project(self, pts_cam: np.ndarray) -> np.ndarray:
-        """Project 3‑D camera‑frame points with IDs to pixel coordinates with IDs.
+        """
+        Project **(id, X, Y, Z)** → **(id, u, v)** (noisy coords).
 
-        Parameters
-        ----------
-        pts_cam : array‑like, shape (N, 4) or (4,)
-            Points in camera coordinates encoded as (id, X, Y, Z).
-
-        Returns
-        -------
-        uv_id : ndarray, shape (N, 3)
-            Projected pixel coordinates ``(id, u, v)``.
+        The Gaussian noise σ is derived from ``noise_std`` % of the
+        image diagonal.  The displacement report is likewise normalised.
         """
         pts = np.asarray(pts_cam, dtype=np.float64)
         if pts.ndim == 1:
             pts = pts[None, :]
         if pts.shape[1] != 4:
-            raise ValueError("Input must have shape (N,4) or (4,) with (id,x,y,z)")
+            raise ValueError("Input must have shape (N,4): (id,x,y,z)")
 
-        ids = pts[:, 0]
+        ids = pts[:, 0].astype(int)
         X, Y, Z = pts[:, 1], pts[:, 2], pts[:, 3]
+
         if np.any(Z <= 0):
-            raise ValueError("All Z values must be positive (in front of camera).")
+            raise ValueError("All Z must be positive (point in front of camera)")
 
-        x = X / Z
-        y = Y / Z
+        # — ideal pin-hole projection —
+        u_ideal = self.fx * (X / Z) + self.cx
+        v_ideal = self.fy * (Y / Z) + self.cy
 
-        u = self.fx * x + self.cx
-        v = self.fy * y + self.cy
-        uv_id = np.column_stack((ids, u, v))
+        # — add Gaussian noise (σ in px) —
+        u_noisy = u_ideal.copy()
+        v_noisy = v_ideal.copy()
+        if self.noise_u > 0 or self.noise_v > 0:
+            u_noisy += self._rng.normal(0.0, self.noise_u, size=u_noisy.shape)
+            v_noisy += self._rng.normal(0.0, self.noise_v, size=v_noisy.shape)
 
-        self._show_on_canvas(uv_id)
+        # — FOV check (ideal coords) —
+        width, height = self.image_shape
+        oob = ((u_ideal < 0) | (u_ideal >= width) |
+               (v_ideal < 0) | (v_ideal >= height))
+        if np.any(oob):
+            msg_ids = ", ".join(map(str, ids[oob]))
+            msg = f"Point(s) {msg_ids} outside image {self.image_shape}"
+            if self.allMustBeInFOV:
+                raise ValueError(msg)
+            elif self.dolog:
+                print("[WARN]", msg)
 
-        return uv_id
+        # — optional preview —
+        if self.show:
+            self._show_on_canvas(ids, u_ideal, v_ideal, u_noisy, v_noisy)
 
-    def _show_on_canvas(self, uv_id: np.ndarray) -> None:
-        """Display projected pixels and IDs on a blank canvas via OpenCV."""
+        # — average-displacement report (after preview) —
+        if self.report_disp and self._prev_uv is not None:
+            common = np.intersect1d(ids, list(self._prev_uv.keys()))
+            if common.size:
+                disp_px = []
+                for pid in common:
+                    prev_u, prev_v = self._prev_uv[pid]
+                    idx = np.where(ids == pid)[0][0]
+                    du = u_noisy[idx] - prev_u
+                    dv = v_noisy[idx] - prev_v
+                    disp_px.append(math.hypot(du, dv))
+                mean_px = float(np.mean(disp_px))
+                self.mean_pct = (mean_px / self.image_diag) * 100.0
+                print(f"[camera] Average displacement: {self.mean_pct:.3f}% "
+                      f"of diag ({mean_px:.2f} px, {len(disp_px)} pts)")
+
+        # — store coords for next call —
+        self._prev_uv = {pid: (u, v) for pid, u, v in zip(ids, u_noisy, v_noisy)}
+
+        return np.column_stack((ids, u_noisy, v_noisy))
+
+    # ------------------------------------------------------------------ #
+    #  private helpers
+    # ------------------------------------------------------------------ #
+    def _show_on_canvas(
+        self,
+        ids: np.ndarray,
+        u_ideal: np.ndarray,
+        v_ideal: np.ndarray,
+        u_noisy: np.ndarray,
+        v_noisy: np.ndarray,
+    ) -> None:
+        """Draw projections in a window called “Pinhole Projection”."""
         width, height = self.image_shape
         canvas = np.zeros((height, width, 3), dtype=np.uint8)
 
-        for pid, u, v in uv_id:
-            u_int = int(round(u))
-            v_int = int(round(v))
-            if 0 <= u_int < width and 0 <= v_int < height:
-                # draw point
-                cv2.circle(canvas, (u_int, v_int), radius=3, color=(0, 255, 0), thickness=-1)
-                # overlay ID
-                cv2.putText(
-                    canvas,
-                    str(int(pid)),
-                    (u_int + 5, v_int - 5),
-                    fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                    fontScale=0.5,
-                    color=(255, 255, 255),
-                    thickness=1,
-                )
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.35  # small font to reduce clutter
+        thickness = 1
+
+        for pid, ui, vi, un, vn in zip(ids, u_ideal, v_ideal, u_noisy, v_noisy):
+            ui_i, vi_i = int(round(ui)), int(round(vi))
+            un_i, vn_i = int(round(un)), int(round(vn))
+
+            clr_ideal = (200, 200, 200)      # light-grey
+            clr_noisy = (0, 255, 0)          # green
+            clr_line  = (120, 120, 120)      # mid-grey
+
+            # ideal point
+            cv2.circle(canvas, (ui_i, vi_i), 3, clr_ideal, -1)
+
+            if self.show_noise:
+                # noisy point + connection
+                cv2.circle(canvas, (un_i, vn_i), 3, clr_noisy, -1)
+                cv2.line(canvas, (ui_i, vi_i), (un_i, vn_i), clr_line, 1)
+
+                mid_x = int(round((ui_i + un_i) / 2))
+                mid_y = int(round((vi_i + vn_i) / 2))
+                cv2.putText(canvas, str(pid), (mid_x + 3, mid_y - 3),
+                            font, scale, clr_noisy, thickness)
             else:
-                if self.allMustBeInFOV:
-                    raise ValueError(f"Point ID {int(pid)} at ({u_int}, {v_int}) is outside image bounds {self.image_shape}")
-                else:
-                    print(f"[WARNING] Point ID {int(pid)} at ({u_int}, {v_int}) is outside image bounds {self.image_shape}")
+                # noisy point only
+                cv2.circle(canvas, (un_i, vn_i), 3, clr_noisy, -1)
+                cv2.putText(canvas, str(pid), (un_i + 3, vn_i - 3),
+                            font, scale, clr_noisy, thickness)
 
+        cv2.imshow("Pinhole Projection", canvas)
+        cv2.waitKey(1)
+
+    # ------------------------------------------------------------------ #
+    #  repr
+    # ------------------------------------------------------------------ #
+    def __repr__(self) -> str:  # pragma: no cover
+        flags = []
         if self.show:
-            cv2.imshow("Pinhole Projection Preview", canvas)
-            cv2.waitKey(1)
+            flags.append("show")
+        if self.show_noise:
+            flags.append("show_noise")
+        if self.report_disp:
+            flags.append("report_disp")
+        if not self.allMustBeInFOV:
+            flags.append("ambif=False")
+        flag_str = ", ".join(flags)
+        return (f"{self.__class__.__name__}(image_shape={self.image_shape}, "
+                f"noise_std_pct=({self.noise_u_pct:.2f}, {self.noise_v_pct:.2f})"
+                + (", " + flag_str if flag_str else "") + ")")
 
-# ====================================================================== #
+
+# ========================================================================= #
+#  convenience subclass – square pixels, centred principal point
+# ========================================================================= #
 class SquaredPixelFocalCenteredPinholeCamera(PinholeCamera):
-    """A *minimal* pinhole camera model with the following assumptions:
-
-    * **Focal‑centred** – principal point sits exactly at the image centre.
-    * **Square pixels** – pixel aspect ratio is 1 ⇒ `fx == fy == f`.
-    * **No lens distortion**.
-
-    Therefore the camera can be fully described by **only two inputs**:
-
-    1. ``image_shape`` – the image dimensions in *pixels*.
-    2. ``hfov_deg`` – the horizontal field‑of‑view in *degrees*.
+    """
+    Convenience subclass: square pixels & centred principal point.
+    Needs only ``image_shape`` and ``hfov_deg``.
     """
 
     def __init__(
         self,
         image_shape: Tuple[int, int],
         hfov_deg: float,
+        *,
         show: bool = False,
         log: bool = False,
-        ambif: bool = True, # Determines if exception is gonna be thrown when a point out of FOV
+        ambif: bool = True,
+        noise_std: float | Tuple[float, float] = 0.0,
+        show_noise: bool = False,
+        report_disp: bool = False,
+        rng: int | np.random.Generator | None = None,
     ) -> None:
-        W, H = int(image_shape[0]), int(image_shape[1])
+        W, H = map(int, image_shape)
         hfov_rad = math.radians(float(hfov_deg))
-        if hfov_rad <= 0 or hfov_rad >= math.pi:
-            raise ValueError("hfov_deg must be in the open interval (0, 180)")
-        f = (W / 2.0) / math.tan(hfov_rad / 2.0)
+        if not 0 < hfov_rad < math.pi:
+            raise ValueError("hfov_deg must be in (0, 180)")
 
-        cx = W / 2.0
-        cy = H / 2.0
-
+        f = (W / 2) / math.tan(hfov_rad / 2)
+        cx, cy = W / 2, H / 2
         self.f = f
         self.hfov_deg = float(hfov_deg)
-        self.vfov_deg = math.degrees(2.0 * math.atan((H / 2.0) / f))
+        self.vfov_deg = math.degrees(2 * math.atan((H / 2) / f))
         self.image_shape = (W, H)
 
         super().__init__(
@@ -166,17 +307,22 @@ class SquaredPixelFocalCenteredPinholeCamera(PinholeCamera):
             image_shape=(W, H),
             show=show,
             log=log,
-            ambif=ambif
+            ambif=ambif,
+            noise_std=noise_std,
+            show_noise=show_noise,
+            report_disp=report_disp,
+            rng=rng,
         )
 
-    def __repr__(self) -> str:
-        return (
-            f"{self.__class__.__name__}(image_shape={self.image_shape}, "
-            f"hfov_deg={self.hfov_deg:.2f}, f={self.f:.2f}px, "
-            f"vfov_deg={self.vfov_deg:.2f})"
-        )
+    def __repr__(self) -> str:  # pragma: no cover
+        base = super().__repr__()
+        base = base.replace(self.__class__.__name__, "")  # drop duplicate
+        return (f"{self.__class__.__name__}(image_shape={self.image_shape}, "
+                f"hfov_deg={self.hfov_deg:.2f}, f={self.f:.2f}px, "
+                f"vfov_deg={self.vfov_deg:.2f}{base}")
 
 
+# convenient alias
 SimpleCamera = SquaredPixelFocalCenteredPinholeCamera
 
 __all__ = [
