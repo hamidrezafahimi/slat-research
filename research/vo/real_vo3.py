@@ -17,6 +17,9 @@ import json
 import random
 
 
+"""Monocular VO sample, with correcting positions having poses of keypoints lied on flat ground"""
+
+
 def load_keypoints_json(json_path):
     with open(json_path, "r") as f:
         data = json.load(f)
@@ -83,46 +86,87 @@ def render_depth_circles(uvs: np.ndarray, pts: np.ndarray, width: int, height: i
 
     return img
 
+def calcFlatGroundDepth(tilt_angle, h=10, vertical_fov_degrees=0.75*66.0, horizontal_fov_degrees=66.0, resolution=(440, 330)):
+    """
+    Calculate the depth data for a camera image based on the geometry of light rays.
+
+    Parameters:
+        tilt_angle (float): The tilt angle of the camera in radians.
+        h (float): Altitude of the camera in meters. Default is 10.
+        vertical_fov_degrees (float): Vertical field of view in degrees. Default is 0.75*66.0.
+        horizontal_fov_degrees (float): Horizontal field of view in degrees. Default is 66.0.
+        resolution (tuple): Resolution of the camera (width, height). Default is (440, 330).
+
+    Returns:
+        np.ndarray: Normalized depth data as a 2D numpy array.
+    """
+    width, height = resolution
+    # Convert FOVs to radians
+    vertical_fov = np.deg2rad(vertical_fov_degrees)
+    horizontal_fov = np.deg2rad(horizontal_fov_degrees)
+    # Generate angles for the vertical and horizontal directions
+    vertical_angles = (np.linspace(-vertical_fov / 2, vertical_fov / 2, height) + tilt_angle)[::-1]
+    horizontal_angles = np.linspace(-horizontal_fov / 2, horizontal_fov / 2, width)
+    # Create a 2D array to store depth values
+    depth_data = np.zeros((height, width))
+    # Calculate depth for each pixel
+    projectionYs = np.zeros((height, width))
+    projectionXs = np.zeros((height, width))
+    for i, v_angle in enumerate(vertical_angles):
+        for j, h_angle in enumerate(horizontal_angles):
+            if -np.pi / 2 <= v_angle <= 0:  # Ensure valid vertical angles
+                r = h / abs(np.sin(v_angle))  # Length in vertical plane
+                R = r / abs(np.cos(h_angle))  # Adjust for horizontal angle
+                depth_data[i, j] = R
+                # point = R * np.array([])
+                # projectionXs[i, j] = 
+            # else:
+            #     depth_data[i, j] = np.inf  # Invalid pixels set to infinity
+
+    max_depth = depth_data.max()
+    min_depth = depth_data.min()
+    # # dimg = ((1 - depth_data / max_depth)-min_depth)
+    # dimg = (1 - depth_data / max_depth)
+    # return (255 * dimg).astype(np.uint8)
+    # Map depth data into the 0-255 range and shift down to ensure the darkest points are zero
+    dimg = (1 - depth_data / max_depth)
+    dimg = dimg - dimg.min()  # Shift the values so the minimum is 0
+
+    return 255.0 - (255.0 * dimg)
+    # return (255 * dimg).astype(np.uint8)
+
 
 if __name__ == '__main__':
     # Usage:
-    #   python run_vo_from_json.py <keypoints.json> <depth_dir> [percent]
+    #   python run_vo_from_json.py <keypoints.json> <depth_background_dir>
     #
-    #   <keypoints.json> : JSON file with frames of keypoints.
-    #   <depth_dir>      : Directory containing depth images (one per frame).
-    #   [percent]        : Optional integer percentage of keypoints to sample distance for (default: 20).
+    #   <keypoints.json>         : JSON file with frames of keypoints.
+    #   <depth_background_dir>   : Directory containing background depth images
+    #                              (one per frame, matching the keypoints frames).
     #
     # Example:
-    #   python run_vo_from_json.py keypoints.json depth_images 20
+    #   python run_vo_from_json.py keypoints.json depth_background_images
 
-    if not (3 <= len(sys.argv) <= 4):
-        print("Usage: python run_vo_from_json.py <keypoints.json> <depth_dir> [percent]")
+    if len(sys.argv) != 3:
+        print("Usage: python run_vo_from_json.py <keypoints.json> <depth_background_dir>")
         sys.exit(1)
 
     json_path = sys.argv[1]
-    depth_dir = sys.argv[2]
-    try:
-        percent = int(sys.argv[3]) if len(sys.argv) == 4 else 20
-    except ValueError:
-        print("Error: [percent] must be an integer.")
-        sys.exit(1)
-    if not (0 <= percent <= 100):
-        print("Error: [percent] must be between 0 and 100.")
-        sys.exit(1)
+    depth_bg_dir = sys.argv[2]
 
     # Load the JSON data of keypoints
     with open(json_path, "r") as f:
         data = json.load(f)
 
-    # Gather and sort depth-image filenames
-    depth_files = [
-        os.path.join(depth_dir, fname)
-        for fname in sorted(os.listdir(depth_dir))
-        if os.path.isfile(os.path.join(depth_dir, fname))
+    # Gather and sort background-depth image filenames
+    bg_files = [
+        os.path.join(depth_bg_dir, fname)
+        for fname in sorted(os.listdir(depth_bg_dir))
+        if os.path.isfile(os.path.join(depth_bg_dir, fname))
     ]
-    if len(depth_files) != len(data):
+    if len(bg_files) != len(data):
         print(
-            f"Error: Number of depth images ({len(depth_files)}) "
+            f"Error: Number of background-depth images ({len(bg_files)}) "
             f"does not match number of frames in JSON ({len(data)})."
         )
         sys.exit(1)
@@ -146,40 +190,37 @@ if __name__ == '__main__':
             print("No keypoints in this frame; exiting loop.")
             break
 
-        # -- Read and preprocess the corresponding depth image --
-        depth_path = depth_files[k]
-        depth_img = cv2.imread(depth_path, cv2.IMREAD_GRAYSCALE)
-        if depth_img is None:
-            print(f"Error: could not load depth image '{depth_path}'.")
+        # -- Read the corresponding background-depth image --
+        bg_path = bg_files[k]
+        depth_bg1 = cv2.imread(bg_path, cv2.IMREAD_GRAYSCALE)
+        if depth_bg1 is None:
+            print(f"Error: could not load background-depth image '{bg_path}'.")
             sys.exit(1)
-        # Invert the depth image: new_depth = 255 - original
-        depth_img = 255 - depth_img
 
-        # -- Build dist_data for this frame --
-        # dist_data: list of [id, dist] or [id, None], length = number of keypoints
-        num_points = uvs.shape[0]
-        num_sample = int(np.ceil((percent / 100.0) * num_points))
-        all_indices = list(range(num_points))
-        sampled_indices = set(random.sample(all_indices, k=num_sample))
+        # depth_bg2 = 255 - depth_bg1
+        height, width = depth_bg1.shape
 
+        depth_val = calcFlatGroundDepth(-0.78)
+
+        # -- Build dist_data based on brightness threshold ( > 4 ) --
         dist_data = []
-        height, width = depth_img.shape
-        for idx in range(num_points):
+        for idx in range(uvs.shape[0]):
             pid, uf, vf = uvs[idx]
             pid = int(pid)
-            if idx in sampled_indices:
-                # Convert float uv to nearest integer pixel coordinates
-                u_int = int(round(uf))
-                v_int = int(round(vf))
-                # Clamp to image boundaries
-                u_int = max(0, min(u_int, width - 1))
-                v_int = max(0, min(v_int, height - 1))
-                dist = float(depth_img[v_int, u_int])
-                dist_data.append([pid, dist])
+            u_int = int(round(uf))
+            v_int = int(round(vf))
+            # Clamp to image boundaries
+            u_int = max(0, min(u_int, width - 1))
+            v_int = max(0, min(v_int, height - 1))
+            brightness = int(depth_bg1[v_int, u_int])
+            if brightness > 4:
+                val = int(depth_val[v_int, u_int])
+                dist_data.append([pid, float(val)])
             else:
                 dist_data.append([pid, None])
 
         # -- Run VO for this frame --
+        # print(dist_data)
         pts_vo = vo.do_vo(uvs, dist_data)
         print(f"VO returned {pts_vo.shape[0]} points.")
 
@@ -210,8 +251,8 @@ if __name__ == '__main__':
             pts_vo,
             ax=ax,
             pts_color='green',
-            label=f'vo_final',
-            title=f'VO Output Final Frame',
+            label='vo_final',
+            title='VO Output Final Frame',
             plt_show=True,
             write_id=True,
             cla=True
@@ -232,6 +273,4 @@ if __name__ == '__main__':
     }
     with open("vo_output.json", "w") as f_out:
         json.dump(output_dict, f_out, indent=2)
-    print("Saved VO output to 'vo_output.json'.")    # cv2.waitKey()
-
-    # cv2.destroyAllWindows()
+    print("Saved VO output to 'vo_output.json'.")

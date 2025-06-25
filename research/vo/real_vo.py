@@ -15,6 +15,9 @@ from mpl_toolkits.mplot3d import Axes3D
 
 import json
 
+"""Monocular VO sample"""
+
+
 def load_keypoints_json(json_path):
     with open(json_path, "r") as f:
         data = json.load(f)

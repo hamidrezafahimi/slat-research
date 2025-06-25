@@ -3,5 +3,5 @@
 
 cd launch/local
 
-python3 map3d_img_simple2.py ../../data/274/asfd.csv ../../data/274/pattern.csv ../../data/274/pattern.png ../../data/274/fasdfdf.png ../../data/274/mask.png
+python3 map3d_img.py ../../data/kitti_image_sample/metric_depth.csv ../../data/kitti_image_sample/metric_pattern.csv ../../data/kitti_image_sample/color.png ../../data/kitti_image_sample/mask.png
 ```

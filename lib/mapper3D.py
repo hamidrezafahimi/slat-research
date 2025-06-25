@@ -32,41 +32,22 @@ class Mapper3D:
             # Set initial view orientation
             self.ax.view_init(elev=-170, azim=-85)
 
-    def process(self, metric_depth, metric_bg, bg_image, color_img, mask_image, roll, pitch, yaw, 
+    def process(self, metric_depth, metric_bg, color_img, mask_image, roll, pitch, yaw, 
                 altitude, hfov):
 
         ## Scale depth data and background image to lie under 255.0 as float numbers
         # Metric depth data, such that the farthest point becomes 255.0 meters away
         metric_depth_scaled = metric_depth / np.max(metric_depth) * 255.0
-        # bg_image = bg_image / np.max(metric_depth) * 255.0
-        metric_bg = metric_bg / np.max(metric_depth) * 255.0
+        metric_bg_scaled = metric_bg / np.max(metric_depth) * 255.0
 
-        ## Setup background image ---------------------
-        # 1. metric background
-        bg_scaled = np.where(metric_bg < metric_depth_scaled, metric_depth_scaled, metric_bg)
+        # Setup background image ---------------------
+        bg_scaled = np.where(metric_bg_scaled < metric_depth_scaled, metric_depth_scaled, metric_bg_scaled)
 
-        # 2. Visual background 
-        # bg_scaled = np.where(bg_image < metric_depth_scaled, metric_depth_scaled, bg_image)
-
-        # cv2.imwrite('/home/hamid/depth.png', metric_depth_scaled)
-        before = np.where(metric_depth_scaled < metric_bg, 255, 0).astype(np.uint8)
-        cv2.imshow("mask before rescaling", before)
+        # before = np.where(metric_depth < metric_bg, 255, 0).astype(np.uint8)
+        # cv2.imshow("mask before rescaling", before)
         # after = np.where(metric_depth_scaled < metric_bg_scaled, 255, 0).astype(np.uint8)
         # cv2.imshow("mask after rescaling", after)
-        # cv2.imshow("bg pat", bg_scaled.astype(np.uint8))
-        # bg_scaled = np.where(bg_scaled < metric_depth_scaled, metric_depth_scaled, bg_scaled)
-        # print(np.min(depth_image))
-
-        # cv2.imshow('s', bg_image)
-        # cv2.imshow('d', depth_image)
-        # bg_scaled = np.min(metric_depth_scaled) + \
-        #     ((np.max(metric_depth_scaled) - np.min(metric_depth_scaled)) / 255.0) * (bg_image.astype(np.float32) - np.min(bg_image.astype(np.float32)))
-        # min_val = np.min(metric_depth_scaled)
-        # bg_scaled = min_val + ((1.0 - (min_val / 255.0)) * bg_image.astype(np.float32))
-        # bg_scaled = metric_depth_scaled - (depth_image.astype(np.float32) - bg_image.astype(np.float32))
-        # metric_depth_scaled, bg_scaled = unified_scale(metric_depth, bg_image.astype(np.float32))
-        # bg_scaled = np.where(mask_image > 127, )
-        cv2.waitKey()
+        # cv2.waitKey()
         
         assert np.max(metric_depth_scaled) <= 255.0 and np.min(metric_depth_scaled) >= 0.0, \
             f"max: {np.max(metric_depth_scaled)}, min: {np.min(metric_depth_scaled)}"
@@ -75,35 +56,11 @@ class Mapper3D:
 
         # Compute ground elevation profile - What the true background must be, with 255.0 as max val
         gep_depth = calc_ground_depth(hfov, pitch_rad=pitch, output_shape=metric_depth.shape)
-        # print("---", np.min(gep_depth), np.max(gep_depth), np.min(bg_scaled), np.max(bg_scaled))
-        # if (np.min(gep_depth) > np.min(bg_scaled)):
-        #     gep_depth -= (np.min(gep_depth) - np.min(bg_scaled))
-        # print(f"max: {np.max(gep_depth)}, min: {np.min(gep_depth)}")
-        # print(f"max: {np.max(depth_image)}, min: {np.min(depth_image)}")
-        # print(f"max: {np.max(bg_image)}, min: {np.min(bg_image)}")
-        # print(f"max: {np.max(metric_depth_scaled)}, min: {np.min(metric_depth_scaled)}")
-        # print(f"max: {np.max(bg_scaled)}, min: {np.min(bg_scaled)}")
-        
-        # cv2.imshow("gep depth", gep_depth.astype(np.uint8))
-        # cv2.imwrite('/home/hamid/gep.png', gep_depth)
-        # cv2.imshow("bg_scaled", bg_scaled.astype(np.uint8))
-        # fimg = transform_depth(metric_depth_scaled, bg_scaled, gep_depth)
-        fimg = move_depth(metric_depth_scaled, bg_scaled, gep_depth)
-        # np.savetxt('/home/hamid/fimg.csv', fimg, delimiter=',')
-        # np.savetxt('/home/hamid/metric_depth_scaled.csv', metric_depth_scaled, delimiter=',')
-        # np.savetxt('/home/hamid/mask.csv', mask_image, delimiter=',')
-        # fimg = np.where(mask_image > 127, metric_depth_scaled, gep_depth)
 
-        # index_mask = np.where(mask_image < 127 and gep_depth <= 254.0, True, False)
-        # index_mask = np.zeros_like(mask_image)
-        # for i in range(index_mask.shape[0]):
-        #     for j in range(index_mask.shape[1]):
-        #         index_mask[i,j] = (gep_depth[i,j] <= 100 and mask_image[i,j] < 127)
-        # print(bg_scaled[262,416])
-        # mean_raw_depth_pc_z = np.nanmean(np.where(index_mask, rd_pc[:,:,2], np.nan))
-        # rd_pc = depthImage2pointCloud(metric_depth_scaled, roll_rad=roll, pitch_rad=pitch,
-        #                               yaw_rad=yaw, horizontal_fov=hfov, abs_alt=abs(altitude),
-        #                               mean_z_gep_pc = mean_raw_depth_pc_z*3.5)
+        # Replace visual background pattern with ground elevation pattern
+        fimg = move_depth(metric_depth_scaled, bg_scaled, gep_depth)
+
+        ## Generate point-clouds and scale them
         gep_pc = depthImage2pointCloud(gep_depth, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
                                        horizontal_fov=hfov)#, abs_alt=abs(altitude), geppc=gpc, mask=mask_image)#,
         gpc = np.zeros_like(color_img).astype(np.float32)
@@ -111,7 +68,6 @@ class Mapper3D:
         scale_factor = gpc[:,:,2] / gep_pc[:,:,2]
         gep_pc_scaled = depthImage2pointCloud(gep_depth, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
                                        horizontal_fov=hfov, scale_factor=scale_factor)#, abs_alt=abs(altitude), geppc=gpc, mask=mask_image)#,
-        # print(gpc[0,0,2], gep_pc[0,0,2])
         # bg_pc = depthImage2pointCloud(bg_scaled, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
         #                               horizontal_fov=hfov)#,
         rd_pc = depthImage2pointCloud(metric_depth_scaled, roll_rad=roll, pitch_rad=pitch,
@@ -127,16 +83,9 @@ class Mapper3D:
         fimg_pc = depthImage2pointCloud(fimg, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
                                         horizontal_fov=hfov)
 
-        # np.savetxt('/home/hamid/rebef.csv', metric_depth_scaled/bg_scaled, delimiter=',')
-        # np.savetxt('/home/hamid/reaf.csv', fimg/gep_depth, delimiter=',')
-        # np.savetxt('/home/hamid/gep_d.csv', gep_depth, delimiter=',')
-        # np.savetxt('/home/hamid/fimg.csv', fimg_pc[:,:,2], delimiter=',')
-        # np.savetxt('/home/hamid/metric_depth_scaled.csv', metric_depth_scaled, delimiter=',')
-        # np.savetxt('/home/hamid/bg_s.csv', bg_scaled, delimiter=',')
-
         if self.plot:
             # self.plot_point_cloud(gep_pc_scaled, color_img)
-            self.plot_point_cloud(rd_pc_scaled, color_img, save=True)
+            self.plot_point_cloud(rd_pc_scaled, color_img)
             # self.plot_point_cloud(rd_pc_scaled, color_img, aug_points=gep_pc_scaled, aug_img=np.zeros_like(color_img))
             # self.plot_point_cloud(bg_pc, color_img, aug_points=gep_pc, aug_img=color_img)
             # self.plot_point_cloud(rd_pc, color_img, aug_points=bg_pc, aug_img=np.zeros_like(color_img))
@@ -144,7 +93,8 @@ class Mapper3D:
             #                       aug_img=np.zeros_like(color_img), save=True)
             # self.plot_point_cloud(rd_pc_scaled, color_img, aug_points=gep_pc_scaled, 
             #                       aug_img=np.zeros_like(color_img), save=True)
-            self.plot_point_cloud(fimg_pc, color_img, aug_points=gep_pc, aug_img=np.zeros_like(color_img))
+            # self.plot_point_cloud(fimg_pc, color_img, aug_points=gep_pc, aug_img=np.zeros_like(color_img))
+            self.plot_point_cloud(fimg_pc, color_img, save=True)
             # self.plot_point_cloud(bg_pc, np.zeros_like(color_img))
 
         if self.vis:

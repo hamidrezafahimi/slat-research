@@ -35,7 +35,7 @@ def move_depth(depth_image, bg_image, gep_image):
 
     # Extract foreground
     fg_prox = proximity_image - bg_prox
-    # assert np.all(fg_prox >= 0)
+    assert np.all(fg_prox >= 0)
 
     # Rescale foreground objects
     # 1. No rescaling
@@ -52,10 +52,6 @@ def move_depth(depth_image, bg_image, gep_image):
     # Replace old background with new background
     # 1. main functionality
     moved_prox = fg_prox_scaled + gep_prox
-    # np.savetxt('/home/hamid/gep_prox.csv', gep_prox, delimiter=',')
-    # np.savetxt('/home/hamid/fg_prox_scaled.csv', fg_prox_scaled, delimiter=',')
-    # np.savetxt('/home/hamid/bg_prox.csv', bg_prox, delimiter=',')
-    # np.savetxt('/home/hamid/proximity_image.csv', proximity_image, delimiter=',')
     # 2. No background
     # moved_prox = fg_prox_scaled
     # 3. No rescaling
@@ -72,8 +68,6 @@ def move_depth(depth_image, bg_image, gep_image):
     assert np.max(moved_prox) < 255.0 and np.min(moved_prox) >= 0.0,\
         f"min: {np.min(moved_prox):.2f}, max: {np.max(moved_prox):.2f}"
     moved_depth = 255.0 - moved_prox
-    print(depth_image[33,416], bg_image[33,416], moved_depth[33,416], gep_image[33,416])
-    print(gep_image[0,416], gep_image[175,416], bg_image[0,416], bg_image[175,416])
     return moved_depth
 
 
@@ -173,7 +167,6 @@ def depthImage2pointCloud(D,
 
     D2 = D * scale_factor
     pc1 = dirs_nwu * (D2[..., np.newaxis])
-    np.savetxt('/home/hamid/asdf.csv', pc1[:,:,2], delimiter=',')
     return pc1
 
 
@@ -243,8 +236,8 @@ def calc_ground_depth(hfov_degs,
     depth_img     = np.full((H, W), 255.0, dtype=np.float32)    # start with sky
     depth_img[ground_mask] = distance_raw[ground_mask] * scale
     depth_img     = np.minimum(depth_img, 255.0)                # clamp just in case
-
     return depth_img
+
 
 def rescale_depth(depth_image, bg_image, pitch):
     gep_f = calc_ground_depth(66.0, pitch_rad=pitch, output_shape=depth_image.shape)
@@ -272,12 +265,12 @@ def rescale_depth(depth_image, bg_image, pitch):
         raise ValueError("Non-logical ratio calculation")
     return final_f, gep_f
 
+
 def unified_scale(foreground: np.ndarray, background: np.ndarray):
     min_fg = np.min(foreground)
     max_bg = np.max(background)
 
     assert min_fg <= np.min(background), "Foreground must contain the global minimum"
-    print(max_bg, np.max(foreground))
     assert max_bg >= np.max(foreground), "Background must contain the global maximum"
 
     fg_flat = foreground.flatten()
@@ -294,8 +287,8 @@ def unified_scale(foreground: np.ndarray, background: np.ndarray):
     # Split back
     fg_scaled = scaled_combined[:fg_flat.size].reshape(foreground.shape)
     bg_scaled = scaled_combined[fg_flat.size:].reshape(background.shape)
-
     return fg_scaled, bg_scaled
+
 
 def interp_2d(metric_depth, mask, plot=False):
 
