@@ -21,6 +21,36 @@ import cv2
 import numpy as np
 
 
+def rotation_matrix_x(phi):
+    """Rotation about x-axis."""
+    c = np.cos(phi)
+    s = np.sin(phi)
+    return np.array([
+        [1, 0, 0],
+        [0, c, s],
+        [0, -s, c]
+    ])
+
+def rotation_matrix_y(theta):
+    """Rotation about y-axis."""
+    c = np.cos(theta)
+    s = np.sin(theta)
+    return np.array([
+        [c, 0, -s],
+        [0, 1, 0],
+        [s, 0, c]
+    ])
+
+def rotation_matrix_z(psi):
+    """Rotation about z-axis."""
+    c = np.cos(psi)
+    s = np.sin(psi)
+    return np.array([
+        [c, s, 0],
+        [-s, c, 0],
+        [0, 0, 1]
+    ])
+
 # ========================================================================= #
 #  core class
 # ========================================================================= #
@@ -131,7 +161,77 @@ class PinholeCamera:
             float,
         )
 
-    def project(self, pts_cam: np.ndarray) -> np.ndarray:
+    def project_2dTo3d(self, uvs: np.ndarray, rpy=None) -> np.ndarray:
+        """
+        Back-project *pixel* coordinates to *unit* 3-D rays.
+
+        Parameters
+        ----------
+        uvs : ndarray[..., 2]
+            Any shape whose *last* dimension is ``(u, v)``.
+        rpy : (roll, pitch, yaw) | None, optional
+            Aircraft attitude (NED → FRD).  Values may be **degrees** or
+            **radians** – a simple 2 π heuristic decides.  If *None*, the
+            rays are returned in the **camera frame** (Right-Down-Forward).
+            Otherwise they are expressed in the **earth NWU frame**.
+
+        Returns
+        -------
+        ndarray[..., 3]   (unit-length)
+        """
+
+        # ---------- 1. pixel → camera (Right-Down-Forward)  -------------
+        uv = np.asarray(uvs, dtype=float)
+        if uv.shape[-1] != 2:
+            raise ValueError("`uvs` must have …×2 shape (u, v)")
+
+        orig_shape = uv.shape[:-1]
+        uv_flat = uv.reshape(-1, 2)
+        u, v = uv_flat.T
+
+        print(self.cx, self.cy, self.fx, self.fy)
+        x_cam = (u - self.cx) / self.fx
+        y_cam = (v - self.cy) / self.fy
+        z_cam = np.ones_like(x_cam)
+
+        dirs_cam = np.stack([x_cam, y_cam, z_cam], axis=-1)
+        dirs_cam /= np.linalg.norm(dirs_cam, axis=-1, keepdims=True)
+
+        # ---------- 2. early exit (camera frame requested) --------------
+        if rpy is None:
+            return dirs_cam.reshape(*orig_shape, 3)
+
+        # ---------- 3. camera → body (FRD) ------------------------------
+        Ry = np.array([[0, 0, 1],
+                       [0, 1, 0],
+                       [-1, 0, 0]])
+        Rx = np.array([[1, 0, 0],
+                       [0, 0, -1],
+                       [0, 1, 0]])
+        cam_to_frd = Rx @ Ry                              # fixed mapping
+        dirs_frd = dirs_cam @ cam_to_frd.T
+
+        # ---------- 4. body → NED (Euler 3-2-1, NED → FRD) --------------
+        roll, pitch, yaw = map(float, rpy)
+        if max(abs(roll), abs(pitch), abs(yaw)) > 2 * math.pi:
+            roll, pitch, yaw = map(math.radians, (roll, pitch, yaw))
+
+        Rphi   = rotation_matrix_x(-roll)     # note the *minus*
+        Rtheta = rotation_matrix_y(-pitch)
+        Rpsi   = rotation_matrix_z(-yaw)
+
+        # ---------- 5. NED → NWU (earth frame used in the demo) ---------
+        Rnwu_ned = rotation_matrix_x(math.pi)  # 180° about X (North)
+
+        # Total transformation: cam → NWU
+        R_total = Rnwu_ned @ Rpsi @ Rtheta @ Rphi @ cam_to_frd
+        dirs_nwu = dirs_cam @ R_total.T
+        dirs_nwu /= np.linalg.norm(dirs_nwu, axis=-1, keepdims=True)
+
+        return dirs_nwu.reshape(*orig_shape, 3)
+
+
+    def project_3dTo2d(self, pts_cam: np.ndarray) -> np.ndarray:
         """
         Project **(id, X, Y, Z)** → **(id, u, v)** (noisy coords).
 

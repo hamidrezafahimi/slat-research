@@ -1,6 +1,6 @@
 import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
-from scipy.interpolate import interp2d, griddata
+from scipy.interpolate import interp2d, griddata, LinearNDInterpolator
 import matplotlib.pyplot as plt
 
 def transform_depth(depth_image, bg_image, gep_image):
@@ -22,6 +22,38 @@ def arg_max_2d(arr):
     w = arr.shape[1]
     return (int(np.floor(am / w)), (am + 1) % w - 1)
 
+def calc_dist2bottom(pc_up: np.ndarray, pc_down: np.ndarray) -> np.ndarray:
+    H, W, _ = pc_up.shape
+    up_flat = pc_up.reshape(-1, 3)
+    down_flat = pc_down.reshape(-1, 3)
+
+    xy_down = down_flat[:, :2]
+    z_down = down_flat[:, 2]
+    interp = LinearNDInterpolator(xy_down, z_down, fill_value=np.nan)
+
+    projected_z = np.empty_like(up_flat[:, 2])
+    for i, (x, y, _) in enumerate(up_flat):
+        z_proj = interp(x, y)
+        if np.isnan(z_proj):
+            dists = np.linalg.norm(xy_down - [x, y], axis=1)
+            z_proj = z_down[np.argmin(dists)]
+        projected_z[i] = z_proj
+
+    vertical_distances = up_flat[:, 2] - projected_z
+    return vertical_distances.reshape((H, W))
+
+def drop_depth(dpc, bpc, gpc):
+    alt_diff_db = calc_dist2bottom(dpc, bpc)
+    mean_gpc_z = np.mean(gpc[:,:,2])
+    alt_diff_dg = dpc[:,:,2] - mean_gpc_z
+    diff = -(alt_diff_db - alt_diff_dg)
+    dropped_dpc = dpc.copy()
+    dropped_dpc[:,:,2] -= diff
+    return dropped_dpc
+
+def calc_scale_factor(altitudes, pc_to_be_rescaled):
+    min_z = np.min(pc_to_be_rescaled[:,:,2])
+    return altitudes[:,:,2] / min_z
 
 def move_depth(depth_image, bg_image, gep_image):
     assert depth_image.dtype == np.float32 and bg_image.dtype == np.float32 and \
@@ -101,6 +133,49 @@ def rotation_matrix_z(psi):
         [0, 0, 1]
     ])
 
+# def img2dirVecsCam(output_shape, hfov_degs):
+#     H, W = output_shape
+#     aspect_ratio = H / W
+#     # Horizontal FOV in radians
+#     hfov_rad = np.deg2rad(hfov_degs)
+#     # Vertical FOV based on aspect ratio
+#     vfov_rad = 2 * np.arctan(np.tan(hfov_rad / 2) * aspect_ratio)
+#     # Generate angles for each pixel
+#     x_angles = np.linspace(-hfov_rad / 2, hfov_rad / 2, W)
+#     y_angles = np.linspace(-vfov_rad / 2, vfov_rad / 2, H)
+#     # Create meshgrid of angles
+#     theta, phi = np.meshgrid(x_angles, y_angles)
+#     # Compute direction vectors in camera frame
+#     # Assuming forward is Z, right is X, down is Y (OpenCV style)
+#     # For each pixel, the ray direction in 3D is computed from angles:
+#     # x = tan(theta), y = tan(phi), z = 1, then normalize
+#     x = np.sin(theta)
+#     y = np.sin(phi)
+#     # z = np.ones_like(x)
+#     z = np.sqrt(1-x**2-y**2)
+#     # Stack and normalize the vectors
+#     dirs1 = np.stack((x, y, z), axis=-1)
+#     norms = np.linalg.norm(dirs1, axis=-1, keepdims=True)
+#     return dirs1 / norms  # shape (H, W, 3)
+
+def img2dirVecsCam(output_shape, hfov_degs):
+    H, W = output_shape
+    hfov_rad = np.radians(hfov_degs)
+    focal_length = (W / 2) / np.tan(hfov_rad / 2)
+    cx, cy = W / 2, H / 2
+
+    # Generate direction vectors in camera frame
+    x_idxs = np.arange(W)
+    y_idxs = np.arange(H)
+    x_grid, y_grid = np.meshgrid(x_idxs, y_idxs)
+    X = (x_grid - cx) / focal_length
+    Y = (y_grid - cy) / focal_length
+    # Z = np.sqrt(1-X**2-Y**2)
+    Z = np.ones_like(X)
+    norm = np.sqrt(X**2 + Y**2 + Z**2)
+    X /= norm; Y /= norm; Z /= norm
+    return np.stack((X, Y, Z), axis=-1)  # (H, W, 3)
+
 def depthImage2pointCloud(D,
                           horizontal_fov,
                           roll_rad,
@@ -130,22 +205,7 @@ def depthImage2pointCloud(D,
         unique_vals = np.unique(mask)
         assert set(unique_vals).issubset({0, 255}), "binary mask should only have 0 or 255"
 
-    # Convert horizontal FOV to radians and compute focal length
-    hfov_rad = np.radians(horizontal_fov)
-    H, W = D.shape
-    focal_length = (W / 2) / np.tan(hfov_rad / 2)
-    cx, cy = W / 2, H / 2
-
-    # Generate direction vectors in camera frame
-    x_idxs = np.arange(W)
-    y_idxs = np.arange(H)
-    x_grid, y_grid = np.meshgrid(x_idxs, y_idxs)
-    X = (x_grid - cx) / focal_length
-    Y = (y_grid - cy) / focal_length
-    Z = np.ones_like(X)
-    norm = np.sqrt(X**2 + Y**2 + Z**2)
-    X /= norm; Y /= norm; Z /= norm
-    dirs = np.stack((X, Y, Z), axis=-1)  # (H, W, 3)
+    dirs = img2dirVecsCam(D.shape, horizontal_fov)
 
     # Camera-to-body and body-to-earth rotations
     Ry = np.array([[ 0,  0, 1], [0, 1, 0], [-1, 0, 0]])
@@ -167,8 +227,7 @@ def depthImage2pointCloud(D,
 
     D2 = D * scale_factor
     pc1 = dirs_nwu * (D2[..., np.newaxis])
-    return pc1
-
+    return pc1, dirs_nwu
 
 def calc_ground_depth(hfov_degs,
                       pitch_rad,
@@ -269,21 +328,15 @@ def rescale_depth(depth_image, bg_image, pitch):
 def unified_scale(foreground: np.ndarray, background: np.ndarray):
     min_fg = np.min(foreground)
     max_bg = np.max(background)
-
     assert min_fg <= np.min(background), "Foreground must contain the global minimum"
     assert max_bg >= np.max(foreground), "Background must contain the global maximum"
-
     fg_flat = foreground.flatten()
     bg_flat = background.flatten()
-
     combined = np.concatenate([fg_flat, bg_flat])
     max_val = np.max(combined)
-
     if max_val == 0:
         raise ValueError("Maximum value is zero; cannot scale.")
-
     scaled_combined = combined * 255.0 / max_val
-
     # Split back
     fg_scaled = scaled_combined[:fg_flat.size].reshape(foreground.shape)
     bg_scaled = scaled_combined[fg_flat.size:].reshape(background.shape)
@@ -291,35 +344,24 @@ def unified_scale(foreground: np.ndarray, background: np.ndarray):
 
 
 def interp_2d(metric_depth, mask, plot=False):
-
     mask_bool = np.where(mask > 127, False, True)
-
     Z_masked = np.where(mask_bool, metric_depth, np.nan) # Replace masked values with NaN
-
     x_coords = np.linspace(0, mask.shape[1], mask.shape[1])
     y_coords = np.linspace(0, mask.shape[0], mask.shape[0])
     X_orig, Y_orig = np.meshgrid(x_coords, y_coords)
-
     valids = ~np.isnan(Z_masked)
-
     x_s = X_orig[valids]
     y_s = Y_orig[valids]
     z_s = metric_depth[valids]
-
     xi, yi = np.meshgrid(np.linspace(0, mask.shape[1], mask.shape[1]), np.linspace(0, mask.shape[0], mask.shape[0]))
-
     # # 'kind' can be 'linear', 'cubic', or 'quintic'
     zi = griddata((x_s,y_s), z_s, (xi, yi), method='linear')
-
     if plot:
         fig = plt.figure(figsize=(10, 5))
-
         ax1 = fig.add_subplot(111, projection='3d')
         ax1.plot_surface(xi, yi, zi, cmap='viridis')
         # ax1.plot_surface(X_orig, Y_orig, Z_masked, cmap='viridis')
         # print(x_coords.shape, y_coords.shape, Z_masked.shape)
-
         plt.tight_layout()
         plt.show()
-    
     return zi

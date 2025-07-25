@@ -61,40 +61,50 @@ class Mapper3D:
         fimg = move_depth(metric_depth_scaled, bg_scaled, gep_depth)
 
         ## Generate point-clouds and scale them
-        gep_pc = depthImage2pointCloud(gep_depth, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
+        gep_pc, dirs = depthImage2pointCloud(gep_depth, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
                                        horizontal_fov=hfov)#, abs_alt=abs(altitude), geppc=gpc, mask=mask_image)#,
         gpc = np.zeros_like(color_img).astype(np.float32)
         gpc[:,:,2] = -abs(altitude)
         scale_factor = gpc[:,:,2] / gep_pc[:,:,2]
-        gep_pc_scaled = depthImage2pointCloud(gep_depth, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
-                                       horizontal_fov=hfov, scale_factor=scale_factor)#, abs_alt=abs(altitude), geppc=gpc, mask=mask_image)#,
-        # bg_pc = depthImage2pointCloud(bg_scaled, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
-        #                               horizontal_fov=hfov)#,
-        rd_pc = depthImage2pointCloud(metric_depth_scaled, roll_rad=roll, pitch_rad=pitch,
+        gep_pc_scaled, dirs = depthImage2pointCloud(gep_depth, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
+                                       horizontal_fov=hfov, scale_factor=scale_factor)
+        rd_pc, dirs = depthImage2pointCloud(metric_depth_scaled, roll_rad=roll, pitch_rad=pitch,
                                       yaw_rad=yaw, horizontal_fov=hfov)
 
         # mean_bg_z = np.nanmean(np.where(mask_image>127, np.nan, rd_pc[:,:,2]))
-        mean_bg_z = np.min(rd_pc[:,:,2])
-        scale_factor = gpc[:,:,2] / mean_bg_z
-        rd_pc_scaled = depthImage2pointCloud(metric_depth_scaled, roll_rad=roll, pitch_rad=pitch,
+        scale_factor = calc_scale_factor(gpc, rd_pc)
+        rd_pc_scaled, dirs = depthImage2pointCloud(metric_depth_scaled, roll_rad=roll, pitch_rad=pitch,
                                              yaw_rad=yaw, horizontal_fov=hfov, 
-                                             scale_factor=scale_factor)#, abs_alt=abs(altitude),
-        
-        fimg_pc = depthImage2pointCloud(fimg, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
+                                             scale_factor=scale_factor)
+        bg_pc_scaled, _ = depthImage2pointCloud(bg_scaled, roll_rad=roll, pitch_rad=pitch,
+                                             yaw_rad=yaw, horizontal_fov=hfov, 
+                                             scale_factor=scale_factor)
+        fimg_pc, _ = depthImage2pointCloud(fimg, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
                                         horizontal_fov=hfov)
+        scale_factor = calc_scale_factor(gpc, fimg_pc)
+        fimg_pc_scaled, _ = depthImage2pointCloud(fimg, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
+                                        horizontal_fov=hfov, scale_factor=scale_factor)
+        
+        reshaped_dropped = drop_depth(rd_pc_scaled, bg_pc_scaled, gep_pc_scaled)
 
         if self.plot:
+            # self.plot_point_cloud(gep_pc_scaled, color_img, aug_points=gep_pc_scaled2, aug_img=np.zeros_like(color_img))
             # self.plot_point_cloud(gep_pc_scaled, color_img)
-            self.plot_point_cloud(rd_pc_scaled, color_img)
+            # self.plot_point_cloud(gep_pc, color_img, dirs=dirs)
+            # self.plot_point_cloud(rd_pc_scaled, color_img)
+            # self.plot_point_cloud(rd_pc_scaled, color_img, save=True)
+            # self.plot_point_cloud(rd_pc_scaled, color_img, save=True, dirs=dirs)
             # self.plot_point_cloud(rd_pc_scaled, color_img, aug_points=gep_pc_scaled, aug_img=np.zeros_like(color_img))
+            # self.plot_point_cloud(rd_pc_scaled, color_img, aug_points=bg_pc_scaled, aug_img=np.zeros_like(color_img))
             # self.plot_point_cloud(bg_pc, color_img, aug_points=gep_pc, aug_img=color_img)
             # self.plot_point_cloud(rd_pc, color_img, aug_points=bg_pc, aug_img=np.zeros_like(color_img))
-            # self.plot_point_cloud(rd_pc, color_img, aug_points=gep_pc_scaled, 
+            # self.plot_point_cloud(rd_pc, color_img, aug_points=gep_pc_scaled,
             #                       aug_img=np.zeros_like(color_img), save=True)
-            # self.plot_point_cloud(rd_pc_scaled, color_img, aug_points=gep_pc_scaled, 
+            # self.plot_point_cloud(rd_pc_scaled, color_img, aug_points=gep_pc_scaled,
             #                       aug_img=np.zeros_like(color_img), save=True)
             # self.plot_point_cloud(fimg_pc, color_img, aug_points=gep_pc, aug_img=np.zeros_like(color_img))
-            self.plot_point_cloud(fimg_pc, color_img, save=True)
+            # self.plot_point_cloud(fimg_pc_scaled, color_img, save=True)
+            self.plot_point_cloud(reshaped_dropped, color_img, save=True)
             # self.plot_point_cloud(bg_pc, np.zeros_like(color_img))
 
         if self.vis:
@@ -105,8 +115,10 @@ class Mapper3D:
         return fimg_pc, True
 
     def plot_point_cloud(self, point_cloud, visualization_image=None, constant_color=None,
-                         block_plot=True, aug_points=None, aug_img=None, save=False):
+                     block_plot=True, aug_points=None, aug_img=None, save=False, dirs=None):
         points = point_cloud.reshape(-1, 3)
+        geometries = []
+
         if self.color_mode == 'image':
             assert visualization_image is not None
             h, w, _ = visualization_image.shape
@@ -120,7 +132,6 @@ class Mapper3D:
             colors = plt.cm.coolwarm(norm_dists)[:, :3]  # Red-blue
         elif self.color_mode == 'constant':
             assert constant_color is not None
-            # Use the constant color for all points
             colors = np.tile(constant_color, (points.shape[0], 1))
         elif self.color_mode == 'none':
             pass
@@ -138,16 +149,48 @@ class Mapper3D:
             points = np.vstack([points, aug_points.reshape(-1, 3)])
             colors = np.vstack([colors, aug_colors])
 
+        # Point cloud geometry
+        self.pcd.points = o3d.utility.Vector3dVector(points)
+        if self.color_mode != 'none':
+            self.pcd.colors = o3d.utility.Vector3dVector(colors)
+        geometries.append(self.pcd)
+
+        # Add ray visualization if dirs is given
+        if dirs is not None:
+            H, W, _ = dirs.shape
+            origin = np.array([[0, 0, 0]])
+            ray_points = []
+            ray_lines = []
+            ray_colors = []
+
+            idx = 0
+            scale = 100  # Length of each ray
+            ray_stride = 25  # <-- Downsampling factor (e.g. 2 for every second pixel)
+
+            for i in range(0, H, ray_stride):
+                for j in range(0, W, ray_stride):
+                    d = dirs[i, j] * scale
+                    ray_points.append(origin[0])
+                    ray_points.append(d)
+                    ray_lines.append([idx, idx + 1])
+                    ray_colors.append([0, 0, 1])  # Blue
+                    idx += 2
+
+            line_set = o3d.geometry.LineSet()
+            line_set.points = o3d.utility.Vector3dVector(ray_points)
+            line_set.lines = o3d.utility.Vector2iVector(ray_lines)
+            line_set.colors = o3d.utility.Vector3dVector(ray_colors)
+            geometries.append(line_set)
+
+        # Display
         if self.backend == 'open3d':
-            self.pcd.points = o3d.utility.Vector3dVector(points)
-            if self.color_mode != 'none':
-                self.pcd.colors = o3d.utility.Vector3dVector(colors)
             if block_plot:
-                o3d.visualization.draw_geometries([self.pcd])
+                o3d.visualization.draw_geometries(geometries)
             else:
                 vis = o3d.visualization.Visualizer()
                 vis.create_window(window_name="Open3D Viewer", width=960, height=720, visible=True)
-                vis.add_geometry(self.pcd)
+                for g in geometries:
+                    vis.add_geometry(g)
                 vis.poll_events()
                 vis.update_renderer()
                 vis.run()
