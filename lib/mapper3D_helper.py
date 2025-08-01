@@ -2,6 +2,7 @@ import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.interpolate import interp2d, griddata, LinearNDInterpolator
 import matplotlib.pyplot as plt
+from kinematics.pose import Pose
 
 def transform_depth(depth_image, bg_image, gep_image):
     assert depth_image.dtype == np.float32 and bg_image.dtype == np.float32 and \
@@ -51,9 +52,9 @@ def drop_depth(dpc, bpc, gpc):
     dropped_dpc[:,:,2] -= diff
     return dropped_dpc
 
-def calc_scale_factor(altitudes, pc_to_be_rescaled):
+def calc_scale_factor(desired_altitude, pc_to_be_rescaled):
     min_z = np.min(pc_to_be_rescaled[:,:,2])
-    return altitudes[:,:,2] / min_z
+    return desired_altitude / min_z
 
 def move_depth(depth_image, bg_image, gep_image):
     assert depth_image.dtype == np.float32 and bg_image.dtype == np.float32 and \
@@ -223,7 +224,7 @@ def depthImage2pointCloud(D,
     pc1 = dirs_nwu * (D[..., np.newaxis])
 
     if scale_factor is None:
-        scale_factor = np.ones_like(D)
+        scale_factor = 1
 
     D2 = D * scale_factor
     pc1 = dirs_nwu * (D2[..., np.newaxis])
@@ -365,3 +366,25 @@ def interp_2d(metric_depth, mask, plot=False):
         plt.tight_layout()
         plt.show()
     return zi
+
+
+# def project3DAndScale2(depth_img, pose, hfov_deg, shape):
+#     pc, dirs = depthImage2pointCloud(depth_img, roll_rad=pose._roll_rad, 
+#                                      pitch_rad=pose._pitch_rad, yaw_rad=pose._yaw_rad,
+#                                      horizontal_fov=hfov_deg)
+#     gpc = np.ones(shape).astype(np.float32) * (-abs(pose.z))
+#     scale_factor = calc_scale_factor(gpc, pc)
+#     pc_scaled, dirs = depthImage2pointCloud(depth_img, roll_rad=pose._roll_rad, 
+#                                             pitch_rad=pose._pitch_rad, yaw_rad=pose._yaw_rad,
+#                                     horizontal_fov=hfov_deg, scale_factor=scale_factor)
+#     return pc_scaled
+
+def project3DAndScale(depth_img, pose, hfov_deg, shape):
+    pc, dirs = depthImage2pointCloud(depth_img, roll_rad=pose._roll_rad, 
+                                     pitch_rad=pose._pitch_rad, yaw_rad=pose._yaw_rad,
+                                     horizontal_fov=hfov_deg)
+    scale_factor = calc_scale_factor(-abs(pose.z), pc)
+    pc_scaled, dirs = depthImage2pointCloud(depth_img, roll_rad=pose._roll_rad, 
+                                            pitch_rad=pose._pitch_rad, yaw_rad=pose._yaw_rad,
+                                    horizontal_fov=hfov_deg, scale_factor=scale_factor)
+    return pc_scaled

@@ -4,145 +4,129 @@ import open3d as o3d
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 from mapper3D_helper import *
+from enum import Enum, auto
+from kinematics.pose import Pose
+from dataclasses import dataclass
+
+class RefusionMode(Enum):
+    Replace_25D = auto()
+    Drop = auto()
+    Unfold = auto()
+
+@dataclass
+class Mapper3DConfig:
+    ref_mode: RefusionMode
+    hfov_deg: float
+    shape: tuple = None
+    vis: bool = False
+    plot: bool = False
+    color_mode: str = 'constant'   # Options: 'image', 'proximity', 'constant', 'none'
+    backend: str = 'open3d'        # Options: 'open3d', 'matplotlib'
 
 
 class Mapper3D:
-    def __init__(self, vis=False, plot=False, color_mode='constant', backend='open3d'):
-        """
-        color_mode: 'image', 'proximity', or 'constant'
-        backend: 'open3d' or 'matplotlib'
-        """
-        assert color_mode in ['image', 'proximity', 'constant', 'none'], "color_mode must be 'image', 'proximity', or 'constant'"
-        assert backend in ['open3d', 'matplotlib'], "backend must be 'open3d' or 'matplotlib'"
-        self.color_mode = color_mode
-        self.backend = backend
+    def __init__(self, config: Mapper3DConfig):
+        assert config.color_mode in ['image', 'proximity', 'constant', 'none'], \
+            "color_mode must be 'image', 'proximity', 'constant', or 'none'"
+        assert config.backend in ['open3d', 'matplotlib'], \
+            "backend must be 'open3d' or 'matplotlib'"
+
+        self.config = config
         self.pcd = o3d.geometry.PointCloud()
-        self.vis = vis
-        self.plot = plot
 
-        if color_mode == 'constant':
-            # Generate a random RGB color for all points
-            self.constant_color = np.random.rand(3)
-        else:
-            self.constant_color = None
+        # Constant color if needed
+        self.constant_color = np.random.rand(3) if self.config.color_mode == 'constant' else None
 
-        if backend == 'matplotlib':
+        # Setup matplotlib backend if selected
+        if self.config.backend == 'matplotlib':
             self.fig = plt.figure()
             self.ax = self.fig.add_subplot(111, projection='3d')
-            # Set initial view orientation
             self.ax.view_init(elev=-170, azim=-85)
 
-    def process(self, metric_depth, metric_bg, color_img, mask_image, roll, pitch, yaw, 
-                altitude, hfov):
+    def generate_gep_data(self, pose: Pose):
+        # Compute ground elevation profile - What the true background must be, with 255.0 as max val
+        gep_depth = calc_ground_depth(self.config.hfov_deg, pitch_rad=pose._pitch_rad, 
+                                      output_shape=self.config.shape)
 
+        gep_pc_scaled = project3DAndScale(gep_depth, pose, self.config.hfov_deg, self.config.shape)
+        return gep_pc_scaled, gep_depth
+
+    def process(self, metric_depth, metric_bg, pose, color_img):
+        assert metric_depth.shape == metric_bg.shape == color_img.shape[:2], \
+            f"shapes: depth: {metric_depth.shape}, bg: {metric_bg.shape}, color: {color_img.shape}"
+        if self.config.shape is None:
+            self.config.shape = metric_depth.shape
+        
         ## Scale depth data and background image to lie under 255.0 as float numbers
         # Metric depth data, such that the farthest point becomes 255.0 meters away
-        metric_depth_scaled = metric_depth / np.max(metric_depth) * 255.0
-        metric_bg_scaled = metric_bg / np.max(metric_depth) * 255.0
+        metric_depth_s = metric_depth / np.max(metric_depth) * 255.0
+        metric_bg_s = metric_bg / np.max(metric_depth) * 255.0
 
-        # Setup background image ---------------------
-        bg_scaled = np.where(metric_bg_scaled < metric_depth_scaled, metric_depth_scaled, metric_bg_scaled)
+        gep_pc_scaled, gep_depth = self.generate_gep_data(pose=pose)
 
-        # before = np.where(metric_depth < metric_bg, 255, 0).astype(np.uint8)
-        # cv2.imshow("mask before rescaling", before)
-        # after = np.where(metric_depth_scaled < metric_bg_scaled, 255, 0).astype(np.uint8)
-        # cv2.imshow("mask after rescaling", after)
-        # cv2.waitKey()
+        rd_pc_scaled = project3DAndScale(metric_depth_s, pose, self.config.hfov_deg, 
+                                         self.config.shape)
         
-        assert np.max(metric_depth_scaled) <= 255.0 and np.min(metric_depth_scaled) >= 0.0, \
-            f"max: {np.max(metric_depth_scaled)}, min: {np.min(metric_depth_scaled)}"
-        assert np.max(bg_scaled) <= 255.0 and np.min(bg_scaled) >= 0.0, \
-            f"max: {np.max(bg_scaled)}, min: {np.min(bg_scaled)}"
+        bg_pc_scaled = project3DAndScale(metric_bg_s, pose, self.config.hfov_deg, 
+                                         self.config.shape)
 
-        # Compute ground elevation profile - What the true background must be, with 255.0 as max val
-        gep_depth = calc_ground_depth(hfov, pitch_rad=pitch, output_shape=metric_depth.shape)
+        # Select processing strategy
+        if self.config.ref_mode == RefusionMode.Replace_25D:
+            bg_scaled = np.where(metric_bg_s < metric_depth_s, metric_depth_s, metric_bg_s)
+            fimg = move_depth(metric_depth_s, bg_scaled, gep_depth)
+            refused_pc = project3DAndScale(fimg, pose, self.config.hfov_deg, self.config.shape)
+            
+        elif self.config.ref_mode == RefusionMode.Drop:
+            refused_pc = drop_depth(rd_pc_scaled, bg_pc_scaled, gep_pc_scaled)
 
-        # Replace visual background pattern with ground elevation pattern
-        fimg = move_depth(metric_depth_scaled, bg_scaled, gep_depth)
+        elif self.config.ref_mode == RefusionMode.Unfold:
+            raise ValueError("Not now - 2")
+            # self.process = process_unfold()
+        else:
+            raise ValueError("Unknown refusion mode")
 
-        ## Generate point-clouds and scale them
-        gep_pc, dirs = depthImage2pointCloud(gep_depth, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
-                                       horizontal_fov=hfov)#, abs_alt=abs(altitude), geppc=gpc, mask=mask_image)#,
-        gpc = np.zeros_like(color_img).astype(np.float32)
-        gpc[:,:,2] = -abs(altitude)
-        scale_factor = gpc[:,:,2] / gep_pc[:,:,2]
-        gep_pc_scaled, dirs = depthImage2pointCloud(gep_depth, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
-                                       horizontal_fov=hfov, scale_factor=scale_factor)
-        rd_pc, dirs = depthImage2pointCloud(metric_depth_scaled, roll_rad=roll, pitch_rad=pitch,
-                                      yaw_rad=yaw, horizontal_fov=hfov)
+        if self.config.plot:
+            self.plot_point_cloud(refused_pc, color_img, aug_points=gep_pc_scaled, 
+                                  aug_img=np.zeros_like(color_img))
+            self.plot_point_cloud(rd_pc_scaled, color_img, aug_points=gep_pc_scaled, 
+                                  aug_img=np.zeros_like(color_img))
+            # self.plot_point_cloud(refused_pc, color_img)
 
-        # mean_bg_z = np.nanmean(np.where(mask_image>127, np.nan, rd_pc[:,:,2]))
-        scale_factor = calc_scale_factor(gpc, rd_pc)
-        rd_pc_scaled, dirs = depthImage2pointCloud(metric_depth_scaled, roll_rad=roll, pitch_rad=pitch,
-                                             yaw_rad=yaw, horizontal_fov=hfov, 
-                                             scale_factor=scale_factor)
-        bg_pc_scaled, _ = depthImage2pointCloud(bg_scaled, roll_rad=roll, pitch_rad=pitch,
-                                             yaw_rad=yaw, horizontal_fov=hfov, 
-                                             scale_factor=scale_factor)
-        fimg_pc, _ = depthImage2pointCloud(fimg, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
-                                        horizontal_fov=hfov)
-        scale_factor = calc_scale_factor(gpc, fimg_pc)
-        fimg_pc_scaled, _ = depthImage2pointCloud(fimg, roll_rad=roll, pitch_rad=pitch, yaw_rad=yaw,
-                                        horizontal_fov=hfov, scale_factor=scale_factor)
-        
-        reshaped_dropped = drop_depth(rd_pc_scaled, bg_pc_scaled, gep_pc_scaled)
-
-        if self.plot:
-            # self.plot_point_cloud(gep_pc_scaled, color_img, aug_points=gep_pc_scaled2, aug_img=np.zeros_like(color_img))
-            # self.plot_point_cloud(gep_pc_scaled, color_img)
-            # self.plot_point_cloud(gep_pc, color_img, dirs=dirs)
-            # self.plot_point_cloud(rd_pc_scaled, color_img)
-            # self.plot_point_cloud(rd_pc_scaled, color_img, save=True)
-            # self.plot_point_cloud(rd_pc_scaled, color_img, save=True, dirs=dirs)
-            # self.plot_point_cloud(rd_pc_scaled, color_img, aug_points=gep_pc_scaled, aug_img=np.zeros_like(color_img))
-            # self.plot_point_cloud(rd_pc_scaled, color_img, aug_points=bg_pc_scaled, aug_img=np.zeros_like(color_img))
-            # self.plot_point_cloud(bg_pc, color_img, aug_points=gep_pc, aug_img=color_img)
-            # self.plot_point_cloud(rd_pc, color_img, aug_points=bg_pc, aug_img=np.zeros_like(color_img))
-            # self.plot_point_cloud(rd_pc, color_img, aug_points=gep_pc_scaled,
-            #                       aug_img=np.zeros_like(color_img), save=True)
-            # self.plot_point_cloud(rd_pc_scaled, color_img, aug_points=gep_pc_scaled,
-            #                       aug_img=np.zeros_like(color_img), save=True)
-            # self.plot_point_cloud(fimg_pc, color_img, aug_points=gep_pc, aug_img=np.zeros_like(color_img))
-            # self.plot_point_cloud(fimg_pc_scaled, color_img, save=True)
-            self.plot_point_cloud(reshaped_dropped, color_img, save=True)
-            # self.plot_point_cloud(bg_pc, np.zeros_like(color_img))
-
-        if self.vis:
+        if self.config.vis:
             cv2.imshow("Color Image", color_img)
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
                 return None, False
-        return fimg_pc, True
-
+        return refused_pc
+    
     def plot_point_cloud(self, point_cloud, visualization_image=None, constant_color=None,
                      block_plot=True, aug_points=None, aug_img=None, save=False, dirs=None):
         points = point_cloud.reshape(-1, 3)
         geometries = []
-
-        if self.color_mode == 'image':
+        if self.config.color_mode == 'image':
             assert visualization_image is not None
             h, w, _ = visualization_image.shape
             assert point_cloud.shape[:2] == (h, w), "Image and point cloud dimensions mismatch."
             colors = visualization_image.reshape(-1, 3).astype(np.float32) / 255.0
             if aug_img is not None:
                 aug_colors = aug_img.reshape(-1, 3).astype(np.float32) / 255.0
-        elif self.color_mode == 'proximity':
+        elif self.config.color_mode == 'proximity':
             dists = np.linalg.norm(points, axis=1)
             norm_dists = (dists - dists.min()) / (dists.max() - dists.min() + 1e-6)
             colors = plt.cm.coolwarm(norm_dists)[:, :3]  # Red-blue
-        elif self.color_mode == 'constant':
+        elif self.config.color_mode == 'constant':
             assert constant_color is not None
             colors = np.tile(constant_color, (points.shape[0], 1))
-        elif self.color_mode == 'none':
+        elif self.config.color_mode == 'none':
             pass
         else:
-            raise ValueError(f"Unknown color_mode: {self.color_mode}")
+            raise ValueError(f"Unknown color_mode: {self.config.color_mode}")
 
         # Add one red point at origin
         red_point = np.array([[0.0, 0.0, 0.0]])
         red_color = np.array([[1.0, 0.0, 0.0]])
         points = np.vstack([points, red_point])
-        if self.color_mode != 'none':
+        if self.config.color_mode != 'none':
             colors = np.vstack([colors, red_color])
 
         if aug_points is not None:
@@ -151,7 +135,7 @@ class Mapper3D:
 
         # Point cloud geometry
         self.pcd.points = o3d.utility.Vector3dVector(points)
-        if self.color_mode != 'none':
+        if self.config.color_mode != 'none':
             self.pcd.colors = o3d.utility.Vector3dVector(colors)
         geometries.append(self.pcd)
 
@@ -183,7 +167,7 @@ class Mapper3D:
             geometries.append(line_set)
 
         # Display
-        if self.backend == 'open3d':
+        if self.config.backend == 'open3d':
             if block_plot:
                 o3d.visualization.draw_geometries(geometries)
             else:
