@@ -80,17 +80,20 @@ class Mapper3D:
             refused_pc = drop_depth(rd_pc_scaled, bg_pc_scaled, gep_pc_scaled)
 
         elif self.config.ref_mode == RefusionMode.Unfold:
-            raise ValueError("Not now - 2")
-            # self.process = process_unfold()
+            refused_pc = unfold_depth(rd_pc_scaled, bg_pc_scaled, gep_pc_scaled)
+
         else:
             raise ValueError("Unknown refusion mode")
 
         if self.config.plot:
             self.plot_point_cloud(refused_pc, color_img, aug_points=gep_pc_scaled, 
                                   aug_img=np.zeros_like(color_img))
-            self.plot_point_cloud(rd_pc_scaled, color_img, aug_points=gep_pc_scaled, 
-                                  aug_img=np.zeros_like(color_img))
-            # self.plot_point_cloud(refused_pc, color_img)
+            # self.plot_point_cloud(rd_pc_scaled, color_img, aug_points=gep_pc_scaled, 
+            #                       aug_img=np.zeros_like(color_img))
+            self.plot_point_cloud(refused_pc, color_img, save=True, filename="refused_pc")
+            # self.plot_point_cloud(gep_pc_scaled, color_img, save=True, filename="gep_pc_scaled")
+            # self.plot_point_cloud(rd_pc_scaled, color_img, save=True, filename="rd_pc_scaled")
+            # self.plot_point_cloud(bg_pc_scaled, color_img, save=True, filename="bg_pc_scaled")
 
         if self.config.vis:
             cv2.imshow("Color Image", color_img)
@@ -100,7 +103,7 @@ class Mapper3D:
         return refused_pc
     
     def plot_point_cloud(self, point_cloud, visualization_image=None, constant_color=None,
-                     block_plot=True, aug_points=None, aug_img=None, save=False, dirs=None):
+                     block_plot=True, aug_points=None, aug_img=None, save=False, dirs=None, filename = "output"):
         points = point_cloud.reshape(-1, 3)
         geometries = []
         if self.config.color_mode == 'image':
@@ -181,7 +184,8 @@ class Mapper3D:
                 vis.destroy_window()
 
             if save:
-                o3d.io.write_point_cloud("output_cloud.pcd", self.pcd)
+                output_filename = str(filename) + ".pcd"
+                o3d.io.write_point_cloud(output_filename, self.pcd)
         else:
             # Downsample to plot every n-th point
             n = 500  # Adjustable sampling rate

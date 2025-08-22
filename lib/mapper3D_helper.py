@@ -1,8 +1,10 @@
 import numpy as np
+import open3d as o3d
 from mpl_toolkits.mplot3d import Axes3D
 from scipy.interpolate import interp2d, griddata, LinearNDInterpolator
 import matplotlib.pyplot as plt
 from kinematics.pose import Pose
+import unfold_helper as unfold
 
 def transform_depth(depth_image, bg_image, gep_image):
     assert depth_image.dtype == np.float32 and bg_image.dtype == np.float32 and \
@@ -102,7 +104,6 @@ def move_depth(depth_image, bg_image, gep_image):
         f"min: {np.min(moved_prox):.2f}, max: {np.max(moved_prox):.2f}"
     moved_depth = 255.0 - moved_prox
     return moved_depth
-
 
 def rotation_matrix_x(phi):
     """Rotation about x-axis."""
@@ -298,7 +299,6 @@ def calc_ground_depth(hfov_degs,
     depth_img     = np.minimum(depth_img, 255.0)                # clamp just in case
     return depth_img
 
-
 def rescale_depth(depth_image, bg_image, pitch):
     gep_f = calc_ground_depth(66.0, pitch_rad=pitch, output_shape=depth_image.shape)
     # Convert to float32
@@ -325,7 +325,6 @@ def rescale_depth(depth_image, bg_image, pitch):
         raise ValueError("Non-logical ratio calculation")
     return final_f, gep_f
 
-
 def unified_scale(foreground: np.ndarray, background: np.ndarray):
     min_fg = np.min(foreground)
     max_bg = np.max(background)
@@ -342,7 +341,6 @@ def unified_scale(foreground: np.ndarray, background: np.ndarray):
     fg_scaled = scaled_combined[:fg_flat.size].reshape(foreground.shape)
     bg_scaled = scaled_combined[fg_flat.size:].reshape(background.shape)
     return fg_scaled, bg_scaled
-
 
 def interp_2d(metric_depth, mask, plot=False):
     mask_bool = np.where(mask > 127, False, True)
@@ -367,7 +365,6 @@ def interp_2d(metric_depth, mask, plot=False):
         plt.show()
     return zi
 
-
 # def project3DAndScale2(depth_img, pose, hfov_deg, shape):
 #     pc, dirs = depthImage2pointCloud(depth_img, roll_rad=pose._roll_rad, 
 #                                      pitch_rad=pose._pitch_rad, yaw_rad=pose._yaw_rad,
@@ -388,3 +385,35 @@ def project3DAndScale(depth_img, pose, hfov_deg, shape):
                                             pitch_rad=pose._pitch_rad, yaw_rad=pose._yaw_rad,
                                     horizontal_fov=hfov_deg, scale_factor=scale_factor)
     return pc_scaled
+
+def unfold_depth(dpc, bpc, gpc):
+
+    dpc_pcd = unfold.xyz_image_to_o3d_pcd(dpc)
+    bpc_pcd = unfold.xyz_image_to_o3d_pcd(bpc)
+    gpc_pcd = unfold.xyz_image_to_o3d_pcd(gpc)
+
+
+    g_bpc = bpc
+    g_bpc[:,:,2] = 0
+    gbpc_pcd = unfold.xyz_image_to_o3d_pcd(g_bpc)
+    gbpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+    gbpc_pcd = gbpc_pcd.voxel_down_sample(0.02)
+
+
+    bpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+    bpc_pcd = bpc_pcd.voxel_down_sample(0.02)
+    gpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+    gpc_pcd = gpc_pcd.voxel_down_sample(0.02)
+
+    # unfold.project_points_multi_fast(bpc_pcd, dpc, k=8, visualize=True)
+    print ("Background to Depth")
+    eMs_b2d_vals = unfold.project_points_multi_fast(bpc_pcd, dpc, k=8, just_vals=True) # HxWx1
+    print ("Ground to Background")
+    eMs_g2b_dirs = unfold.project_points_multi_fast(gpc_pcd, bpc, k=8, get_norm=True) # HxWx3
+    print ("Done")
+
+    tvecs = eMs_b2d_vals * eMs_g2b_dirs
+    unfolded_dpc = gpc + tvecs
+    unfolded_dpc = g_bpc + tvecs
+    unfolded_dpc = gpc + eMs_b2d_vals
+    return unfolded_dpc
