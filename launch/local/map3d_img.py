@@ -21,7 +21,7 @@ def main():
 
     p = Pose(x=0,y=0,z=1.7,roll=0,pitch=-0.15,yaw=0)
 
-    cfg = Mapper3DConfig(ref_mode=RefusionMode.Unfold,
+    cfg = Mapper3DConfig(ref_mode=RefusionMode.Replace_25D,
                          vis = True,
                          plot = True,
                          color_mode = 'image',   # Options: 'image', 'proximity', 'constant', 'none'

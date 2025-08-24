@@ -65,4 +65,4 @@ plt.show()
 
 # ------------------ Optional 2D Projection ------------------
 cam = SimpleCamera(hfov_deg=66, show=True, image_shape=(640, 480))
-cam.project(pts_cam)
+cam.project_3dTo2d_pc(pts_cam)

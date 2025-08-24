@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Spline editor (800 × 600 canvas) with coloured control points and
-pattern‑vs‑image overlay.
+Spline editor (800 × 600 canvas) with coloured control points and
+pattern-vs-image overlay.
 
 Changes
 =======
 * **Endpoints always red** – and **no horizontal stripe** is drawn for them.
 * Interior control points get **unique random colours** (never repeat, never
   red). Horizontal stripes in the Pattern window use exactly the control
-  point’s colour and are 4 px thick.
+  point’s colour and are 4 px thick.
 * **s** key still saves:
   * **pattern.png** – greyscale threshold resized to reference‐image size.
   * **mask.png** – 0/255 binary mask where `ref_gray > pattern_gray`.
+* Added configurable threshold range with --thr-min / --thr-max
 """
 from __future__ import annotations
 import cv2
@@ -47,7 +48,7 @@ def rand_unique_color(existing: set[tuple[int, int, int]]) -> tuple[int, int, in
 
 
 def evaluate_curve(ctrl_pts, width):
-    """Return integer xs, ys of spline/polyline across columns 0‥width‑1."""
+    """Return integer xs, ys of spline/polyline across columns 0‥width-1."""
     ctrl_sorted = sorted(ctrl_pts, key=lambda d: d['x'])
     xs_ctrl = np.array([p['x'] for p in ctrl_sorted])
     ys_ctrl = np.array([p['y'] for p in ctrl_sorted])
@@ -57,14 +58,14 @@ def evaluate_curve(ctrl_pts, width):
     else:
         ys = np.interp(xs, xs_ctrl, ys_ctrl)
     ys = np.clip(ys, 0, CANVAS_H - 1)
-    # print(xs.dtype, ys.dtype)
-    # return xs.astype(np.int32), ys.astype(np.int32)
     return xs, ys
 
 
-def make_pattern_gray(ys):
+def make_pattern_gray(ys, thr_min: float, thr_max: float):
+    """Map y-heights into [thr_min, thr_max] intensity range."""
     h_from_bottom = (CANVAS_H - 1 - ys).astype(np.float64)
-    intens = (h_from_bottom / (CANVAS_H - 1) * 255).astype(np.float64)
+    frac = h_from_bottom / (CANVAS_H - 1)  # in [0,1]
+    intens = thr_min + frac * (thr_max - thr_min)
     return intens  # length == CANVAS_W
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -73,14 +74,16 @@ def main(argv=None):
     parser = argparse.ArgumentParser("Spline editor with unique coloured points")
     parser.add_argument("reference", help="reference (parsed) image - mandatory")
     parser.add_argument("--spline", help="base spline", default=None)
-    # args = parser.parse_args(argv)
+    parser.add_argument("--thr-min", type=float, default=0.0,
+                        help="minimum threshold intensity (default 0.0)")
+    parser.add_argument("--thr-max", type=float, default=255.0,
+                        help="maximum threshold intensity (default 255.0)")
     args = parser.parse_args()
 
     # ↓ reference image ---------------------------------------------------
     ref_path = Path(args.reference)
     if not ref_path.is_file():
         sys.exit(f"File '{ref_path}' not found.")
-    # ref_img_orig = cv2.imread(str(ref_path), cv2.IMREAD_COLOR)
     ref_img_orig = np.loadtxt(str(ref_path), delimiter=',', dtype=np.float64)
     if ref_img_orig is None:
         sys.exit("Failed to load reference image.")
@@ -151,23 +154,26 @@ def main(argv=None):
     canvas = np.full((CANVAS_H, CANVAS_W, 3), 255, np.uint8)
     while True:
         xs, ys = evaluate_curve(ctrl_pts, CANVAS_W)
-        patt_gray_cols = make_pattern_gray(ys)  # length 800
+        patt_gray_cols = make_pattern_gray(ys, args.thr_min, args.thr_max)  # length 800
 
         # ── draw canvas ─────────────────────────────────────────────────
         canvas[:] = 255
         cv2.polylines(canvas, [np.column_stack((xs.astype(np.int32), ys.astype(np.int32))).reshape(-1, 1, 2)], False, (0, 0, 0), 2)
         for cp in ctrl_pts:
             cv2.circle(canvas, (cp['x'], cp['y']), CP_RADIUS, cp['color'], -1)
+            # compute intensity for this point
+            frac = (CANVAS_H - 1 - cp['y']) / (CANVAS_H - 1)
+            val = args.thr_min + frac * (args.thr_max - args.thr_min)
+            text = f"{val:.2f}"
+            text_pos = (cp['x'] + 5, cp['y'] - 10)  # small offset
+            cv2.putText(canvas, text, text_pos,
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 1, cv2.LINE_AA)
         cv2.putText(canvas, f"degree = {max(len(ctrl_pts)-1,1)}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,0), 2)
 
         # ── build pattern display image (overlay) ───────────────────────
-        # resize pattern gray to reference size
-        patt_gray_img = cv2.resize(patt_gray_cols[:, None].repeat(CANVAS_H, axis=1), (ref_w, ref_h), interpolation=cv2.INTER_LINEAR)
+        patt_gray_img = cv2.resize(patt_gray_cols[:, None].repeat(CANVAS_H, axis=1),
+                                   (ref_w, ref_h), interpolation=cv2.INTER_LINEAR)
         mask_bool = ref_img_orig < patt_gray_img
-        # print(ref_img_orig.dtype)
-        # print(patt_gray_img.dtype)
-        # print(patt_gray_cols.dtype)
-        # print("---")
         overlay = cv2.cvtColor(ref_img_orig.astype(np.uint8), cv2.COLOR_GRAY2BGR)
         overlay[mask_bool] = RED
         # add coloured horizontal stripes for interior points
@@ -176,11 +182,7 @@ def main(argv=None):
             cv2.line(overlay, (0, y_line), (ref_w - 1, y_line), cp['color'], thickness=4, lineType=cv2.LINE_AA)
 
         cv2.imshow("Spline Editor", canvas)
-        # print((0.25 * overlay.shape[1], 0.25 * overlay.shape[0]))
         cv2.imshow("Pattern", overlay)
-        # cv2.imshow("Pattern", cv2.resize(overlay,
-        #                                  (int(0.25 * overlay.shape[1]), int(0.25 * overlay.shape[0])),
-        #                                  interpolation=cv2.INTER_LINEAR))
 
         key = cv2.waitKey(20) & 0xFF
         if key in (27, ord('q')):
@@ -192,13 +194,12 @@ def main(argv=None):
             ]
         if key == ord('s'):
             # save pattern and mask (no stripes) at reference resolution
-            # print(patt_gray_cols.shape)
-            unique_vals = np.unique(patt_gray_cols)
-            patt_gray_ref = cv2.resize(patt_gray_cols[:, None].repeat(CANVAS_H, axis=1), (ref_w, ref_h), interpolation=cv2.INTER_LINEAR)
-            # print(np.unique(patt_gray_ref[:,0]).shape)
-            print(patt_gray_ref[:,0])
+            patt_gray_ref = cv2.resize(
+                patt_gray_cols[:, None].repeat(CANVAS_H, axis=1),
+                (ref_w, ref_h),
+                interpolation=cv2.INTER_LINEAR,
+            )
             np.savetxt('/home/hamid/pattern.csv', patt_gray_ref, delimiter=',')
-            # cv2.imwrite(SAVE_PATTERN_PATH, patt_gray_ref)
             cv2.imwrite(SAVE_MASK_PATH, (mask_bool.astype(np.uint8) * 255))
             C = []
             for c in ctrl_pts:

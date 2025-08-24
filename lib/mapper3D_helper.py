@@ -387,18 +387,15 @@ def project3DAndScale(depth_img, pose, hfov_deg, shape):
     return pc_scaled
 
 def unfold_depth(dpc, bpc, gpc):
-
     dpc_pcd = unfold.xyz_image_to_o3d_pcd(dpc)
     bpc_pcd = unfold.xyz_image_to_o3d_pcd(bpc)
     gpc_pcd = unfold.xyz_image_to_o3d_pcd(gpc)
-
 
     g_bpc = bpc
     g_bpc[:,:,2] = 0
     gbpc_pcd = unfold.xyz_image_to_o3d_pcd(g_bpc)
     gbpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
     gbpc_pcd = gbpc_pcd.voxel_down_sample(0.02)
-
 
     bpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
     bpc_pcd = bpc_pcd.voxel_down_sample(0.02)

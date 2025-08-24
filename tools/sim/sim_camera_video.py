@@ -79,7 +79,7 @@ for t in range(N):
         pts_nwu, cam_pose=cam_pose,
         roll=roll, pitch=pitch, yaw=yaw
     )
-    uvs = cam.project(pts_cam_t)
+    uvs = cam.project_3dTo2d_pc(pts_cam_t)
 
     print(f"Frame {t}: Press any key in the image window to continue …")
     key = cv2.waitKey(0)
