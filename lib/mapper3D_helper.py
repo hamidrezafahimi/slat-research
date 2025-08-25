@@ -390,27 +390,15 @@ def unfold_depth(dpc, bpc, gpc):
     dpc_pcd = unfold.xyz_image_to_o3d_pcd(dpc)
     bpc_pcd = unfold.xyz_image_to_o3d_pcd(bpc)
     gpc_pcd = unfold.xyz_image_to_o3d_pcd(gpc)
-
-    g_bpc = bpc
-    g_bpc[:,:,2] = 0
-    gbpc_pcd = unfold.xyz_image_to_o3d_pcd(g_bpc)
-    gbpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
-    gbpc_pcd = gbpc_pcd.voxel_down_sample(0.02)
-
+    
     bpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
     bpc_pcd = bpc_pcd.voxel_down_sample(0.02)
     gpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
     gpc_pcd = gpc_pcd.voxel_down_sample(0.02)
-
-    # unfold.project_points_multi_fast(bpc_pcd, dpc, k=8, visualize=True)
-    print ("Background to Depth")
-    eMs_b2d_vals = unfold.project_points_multi_fast(bpc_pcd, dpc, k=8, just_vals=True) # HxWx1
-    print ("Ground to Background")
-    eMs_g2b_dirs = unfold.project_points_multi_fast(gpc_pcd, bpc, k=8, get_norm=True) # HxWx3
-    print ("Done")
-
-    tvecs = eMs_b2d_vals * eMs_g2b_dirs
-    unfolded_dpc = gpc + tvecs
-    unfolded_dpc = g_bpc + tvecs
-    unfolded_dpc = gpc + eMs_b2d_vals
+    
+    proj_b = unfold.project_points_multi_fast(bpc_pcd, dpc, k=8, just_proj=True)
+    proj_g = unfold.project_points_multi_fast(gpc_pcd, proj_b, k=8, just_proj=True)
+    dist = unfold.euclidean_distance_map(dpc, proj_b)
+    unfolded_dpc = proj_g.copy()
+    unfolded_dpc[:, :, 2:3] += dist
     return unfolded_dpc

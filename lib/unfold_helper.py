@@ -193,6 +193,7 @@ def project_points_multi_fast(
     dtype=np.float32,
     print_log=False,
     visualize=False,
+    just_proj = False
 ):
     """
     Fast batched variant with optional logging and visualization.
@@ -326,6 +327,9 @@ def project_points_multi_fast(
 
     if get_norm:
         return out_nvec.reshape(H, W, 3).astype(np.float32)
+    
+    if just_proj:
+        return out_proj.reshape(H, W, 3).astype(np.float32)
 
     # Optional log and visualization
     if keep_candidates:
@@ -398,6 +402,7 @@ def project_points_multi_fast(
             qp.paint_uniform_color([0, 1, 0])
 
             pp_in  = [pk[i, bi_flat[i]] for i in range(N) if bi_flat[i] >= 0]
+            print(pp_in)
             pp_out = [pk[i, bo_flat[i]] for i in range(N) if bo_flat[i] >= 0]
             pc_in  = o3d.geometry.PointCloud()
             pc_in.points = o3d.utility.Vector3dVector(np.asarray(pp_in, dtype=np.float64))
@@ -416,7 +421,10 @@ def project_points_multi_fast(
             #     grid, axes, normals_ls
             # ])
             o3d.visualization.draw_geometries([
-                pcd, qp, pc_in, pc_out, ls_all
+                pcd, qp, pc_in, pc_out,
+                ls_all, ls_in, ls_out,
+                
+                
             ])
 
     # Full nested dict object array (note: building 200k dicts is inherently heavy)
@@ -437,3 +445,27 @@ def project_points_multi_fast(
             }
             flat_idx += 1
     return full
+
+def euclidean_distance_map(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """
+    Compute per-pixel Euclidean distance between two H×W×3 arrays.
+
+    Parameters
+    ----------
+    a, b : np.ndarray
+        Arrays of shape (H, W, 3). Types can be integer or float.
+
+    Returns
+    -------
+    np.ndarray
+        Distance map of shape (H, W, 1), dtype float32.
+    """
+    if a.shape != b.shape:
+        raise ValueError(f"Shape mismatch: a{a.shape} vs b{b.shape}")
+    if a.ndim != 3 or a.shape[2] != 3:
+        raise ValueError(f"Expected shape (H, W, 3), got {a.shape}")
+
+    # Cast once to float for precise diff; keepdims=True → (H, W, 1)
+    diff = a.astype(np.float32) - b.astype(np.float32)
+    dist = np.linalg.norm(diff, axis=2, keepdims=True)  # (H, W, 1)
+    return dist
