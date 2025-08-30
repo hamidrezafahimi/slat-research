@@ -17,3 +17,4 @@ if __name__ == "__main__":
 
     # Draw both the point cloud and the axis
     o3d.visualization.draw_geometries([p, axis])
+    # o3d.visualization.draw_geometries([p])

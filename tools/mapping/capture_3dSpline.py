@@ -24,25 +24,26 @@ from sim.camera import SimpleCamera  # uses your updated camera.py internally
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python script.py <pcd_file>")
+        print("Usage: python script.py spline.csv")
         sys.exit(1)
 
-    _file = sys.argv[1]
+    ctrl_path = sys.argv[1]
 
     # --- paths ---
-    ctrl_path = Path(os.path.join(dir_path, _file))
-    out_csv   = Path(os.path.join(dir_path, "depth_spline.csv"))
+    out_csv   = "depth_spline.csv"
 
     # --- load control points (x,y,z in NWU) ---
     pts = np.loadtxt(ctrl_path, delimiter=",", dtype=float)  # shape (N,3)
 
     # --- camera setup ---
-    W, H = 1241, 376
-    hfov_deg = 80.0
+    # W, H = 1241, 376
+    W, H = 440, 330
+    hfov_deg = 66.0
     cam = SimpleCamera((W, H), hfov_deg=hfov_deg, show=False)
 
     # Mandatory rpy for spline-projection (roll, pitch, yaw). Adjust if needed.
-    rpy = (0.0, -0.02, 0.0)  # radians; use degrees if you prefer, camera.py handles both
+    # rpy = (0.0, -0.02, 0.0)  # radians; use degrees if you prefer, camera.py handles both
+    rpy = (0.0, -0.78, 0.0)  # radians; use degrees if you prefer, camera.py handles both
 
     # --- rasterize spline control grid to per-pixel metric range ---
     # project_3dTo2d_sp returns a depth map (H, W), NaN where no hit.

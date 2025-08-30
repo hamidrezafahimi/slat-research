@@ -391,8 +391,8 @@ def unfold_depth(dpc, bpc, gpc):
     bpc_pcd = unfold.xyz_image_to_o3d_pcd(bpc)
     gpc_pcd = unfold.xyz_image_to_o3d_pcd(gpc)
 
-    g_bpc = bpc
-    g_bpc[:,:,2] = 0
+    g_bpc = bpc.copy()
+    g_bpc[:,:,2] = 0.0
     gbpc_pcd = unfold.xyz_image_to_o3d_pcd(g_bpc)
     gbpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
     gbpc_pcd = gbpc_pcd.voxel_down_sample(0.02)

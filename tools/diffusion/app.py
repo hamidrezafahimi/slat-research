@@ -230,7 +230,7 @@ class PointsApp:
         self.pcd.points = o3d.utility.Vector3dVector(self.points)
         self.scene.scene.remove_geometry("points")
         self.scene.scene.add_geometry("points", self.pcd, self.points_mat)
-        print(f"Selected ctrl (row, col): ({nr}, {nc})  idx={self.rc2idx(nr, nc)}  pos={self.points[self.rc2idx(nr, nc)]}")
+        # print(f"Selected ctrl (row, col): ({nr}, {nc})  idx={self.rc2idx(nr, nc)}  pos={self.points[self.rc2idx(nr, nc)]}")
 
     def _build_surface_mesh(self, ctrl_points):
         verts, tris = sample_bspline_surface(
@@ -269,7 +269,7 @@ class PointsApp:
         self.points[:, 2] += dz
         self._apply_highlight((self.cur_r, self.cur_c), (self.cur_r, self.cur_c))
         self._update_surface()
-        print(f"Translated grid by ({dx:.3f}, {dy:.3f}, {dz:.3f})")
+        # print(f"Translated grid by ({dx:.3f}, {dy:.3f}, {dz:.3f})")
 
     def _save_ctrl_points(self):
         np.savetxt(self.save_path, self.points, fmt="%.6f", delimiter=",")
@@ -282,7 +282,7 @@ class PointsApp:
         start = r * self.grid_w
         end = start + self.grid_w
         self.points[start:end, 2] = z
-        print(f"[ROW] Set row {r} z -> {z:.6f}")
+        # print(f"[ROW] Set row {r} z -> {z:.6f}")
         self._apply_highlight((r, self.cur_c), (r, self.cur_c))
         self._update_surface()
 
@@ -291,7 +291,7 @@ class PointsApp:
         c = self.cur_c
         idxs = [self.rc2idx(r, c) for r in range(self.grid_h)]
         self.points[idxs, 2] = z
-        print(f"[COL] Set col {c} z -> {z:.6f}")
+        # print(f"[COL] Set col {c} z -> {z:.6f}")
         self._apply_highlight((self.cur_r, c), (self.cur_r, c))
         self._update_surface()
 
@@ -315,13 +315,13 @@ class PointsApp:
         # Raise/lower only selected ctrl (uses --step)
         elif event.key == gui.KeyName.U:
             self.points[idx, 2] += self.step
-            print(f"Raised ctrl {idx} to z={self.points[idx,2]:.6f}")
+            # print(f"Raised ctrl {idx} to z={self.points[idx,2]:.6f}")
             self._apply_highlight((self.cur_r, self.cur_c), (self.cur_r, self.cur_c))
             self._update_surface()
             return True
         elif event.key == gui.KeyName.I:
             self.points[idx, 2] -= self.step
-            print(f"Lowered ctrl {idx} to z={self.points[idx,2]:.6f}")
+            # print(f"Lowered ctrl {idx} to z={self.points[idx,2]:.6f}")
             self._apply_highlight((self.cur_r, self.cur_c), (self.cur_r, self.cur_c))
             self._update_surface()
             return True
