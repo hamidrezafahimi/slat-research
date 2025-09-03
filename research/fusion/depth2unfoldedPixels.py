@@ -17,11 +17,10 @@ import argparse
 import time
 import numpy as np
 import os, sys
-from unfold_helper import *
-
-# ---------- project3DAndScale + Pose (same as in your depth2pcd flow) ----------
 DIR_PATH = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(DIR_PATH + "/../../lib")
+from unfold_helper import *
+
 try:
     from kinematics.pose import Pose
     from mapper3D_helper import project3DAndScale

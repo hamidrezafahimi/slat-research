@@ -5,6 +5,9 @@ import numpy as np
 import open3d as o3d
 import random
 from types import SimpleNamespace
+import os, sys
+DIR_PATH = os.path.dirname(os.path.realpath(__file__))
+sys.path.append(DIR_PATH + "/../../lib")
 from unfold_helper import *
 
 def main():

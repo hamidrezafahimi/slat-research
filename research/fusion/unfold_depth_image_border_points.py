@@ -17,6 +17,9 @@ import argparse
 import time
 import numpy as np
 import os, sys
+import os, sys
+DIR_PATH = os.path.dirname(os.path.realpath(__file__))
+sys.path.append(DIR_PATH + "/../../lib")
 from unfold_helper import *  # brings CONFIG, math/vis helpers, and border_grid_indices
 from typing import Optional, Dict
 
@@ -80,8 +83,21 @@ def main():
 
     # Run the high-level API
     max_pts = args.n_greens if args.n_greens and args.n_greens > 0 else None
+
+    # 1) Load metric depth
+    metric_depth = np.loadtxt(args.metric_depth, delimiter=',', dtype=np.float32)
+    # 2) Build pose & HxWx3 via project3DAndScale
+    pose = Pose(**{
+        "x":  pose_kwargs.get("x", 0.0),
+        "y":  pose_kwargs.get("y", 0.0),
+        "z":  pose_kwargs.get("z", 9.4),
+        "roll":  pose_kwargs.get("roll", 0.0),
+        "pitch": pose_kwargs.get("pitch", -0.78),
+        "yaw":   pose_kwargs.get("yaw", 0.0),
+    })
+    xyz_img = project3DAndScale(metric_depth, pose, args.hfov_deg, metric_depth.shape)
     unfolded_pts, extras = unfold_image_border_points(
-        metric_depth_csv=args.metric_depth,
+        xyz_img=xyz_img,
         hfov_deg=args.hfov_deg,
         pose_kwargs=pose_kwargs,
         max_points=max_pts
