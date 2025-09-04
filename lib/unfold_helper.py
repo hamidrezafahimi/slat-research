@@ -850,6 +850,7 @@ def unfold_image_border_points(
 
     # 3) Flatten to pcd (black)
     pts_flat = xyz_img.reshape(-1, 3)
+    np.savetxt("all.csv", xyz_img[:,:,0], delimiter=',')
     mask = np.isfinite(pts_flat).all(axis=1)
     pts_flat = pts_flat[mask]
     if pts_flat.size == 0:
@@ -1109,31 +1110,6 @@ def unfold_image_borders(
         dense_red=dense_red,
     )
 
-    # 🔧 NEW: JSON dump --------------------------------------------------------
-    # import json
-    # import numpy as _np
-
-    # def _to_jsonable(x):
-    #     if isinstance(x, _np.ndarray):
-    #         return x.tolist()
-    #     if isinstance(x, (_np.floating,)):
-    #         return float(x)
-    #     if isinstance(x, (_np.integer,)):
-    #         return int(x)
-    #     if isinstance(x, dict):
-    #         return {k: _to_jsonable(v) for k, v in x.items()}
-    #     if isinstance(x, (list, tuple)):
-    #         return [_to_jsonable(v) for v in x]
-    #     return x
-
-    # try:
-    #     with open("unfold_image_borders_output.json", "w", encoding="utf-8") as f:
-    #         json.dump(_to_jsonable(result), f, ensure_ascii=False, indent=2)
-    #     print("[unfold_image_borders] write JSON")
-    # except Exception as e:
-    #     # Keep the function robust: don't fail just because JSON writing failed.
-    #     print(f"[unfold_image_borders] Warning: failed to write JSON: {e}")
-    # -------------------------------------------------------------------------
     return result, extras
 
 
@@ -1222,31 +1198,33 @@ def unfold_surface(xyz_img,
                    hfov_deg: float = 66.0,
                    pose_kwargs=None):
     """
-    Unfold the entire surface (every pixel) onto plane G using a Coons-patch
-    over the four dense-red border splines (with chord-length parameterization).
+    Unfold the entire surface using the fast row-wise interpolation method:
 
-    Inputs
-    ------
-    xyz_img : (H,W,3) float
-        Original surface points (black cloud) in 3D.
-    hfov_deg : float
-        Forwarded to unfold_image_borders for consistency (not used directly).
-    pose_kwargs : dict | None
-        Forwarded to unfold_image_borders.
+      1) Get dense-red border splines on plane G via unfold_image_borders(...)
+      2) Orient sides to a consistent direction:
+            top:    left->right
+            bottom: left->right   (reverse input)
+            left:   top->bottom   (reverse input)
+            right:  top->bottom
+      3) For each row I, compute a scalar E(I) in [0,1] as the average of:
+            |L[I]-TL| / |TL-BL|  and  |R[I]-TR| / |TR-BR|
+         (distances measured in XY; clamp to [0,1]).
+      4) For each column J, set:
+            S[I,J] = T[J] + E(I) * (B[J] - T[J])     (performed in 3D)
 
     Returns
     -------
-    unfolded_surface : (H,W,3) float32
-        Coons-patch interpolation over the dense red borders on plane G.
+    unfolded_surface : (H, W, 3) float32
+        The unfolded surface points on plane G.
     context : dict
         {
           'pcd', 'cg', 'surface_interior_cg', 'xyz_img',
-          'sides': {'top','right','bottom','left'}  # aligned samples used in Coons
+          'sides': {'top','right','bottom','left'}  # oriented 3D border samples
         }
     """
     import numpy as _np
 
-    # 0) Get dense red border suggestions + scene context
+    # 0) Get dense red borders + scene context (on plane G)
     borders, extras = unfold_image_borders(
         xyz_img=xyz_img,
         hfov_deg=hfov_deg,
@@ -1255,82 +1233,51 @@ def unfold_surface(xyz_img,
     )
     dense_red = borders["dense_red"]  # dict: side -> (N,3)
 
-    # ---- fetch & align directions expected by the Coons construction ----
-    # Our generator directions are:
-    #   TOP:    tl -> tr           (left->right)    ✔ matches
-    #   RIGHT:  tr -> br           (top -> bottom)  ✔ matches
-    #   BOTTOM: br -> bl           (right->left)    ✘ reverse to left->right
-    #   LEFT:   bl -> tl           (bottom->top)    ✘ reverse to top->bottom
-    top    = _np.asarray(dense_red["top"],    dtype=_np.float32)        # (W,3) left->right
-    right  = _np.asarray(dense_red["right"],  dtype=_np.float32)        # (H,3) top->bottom
-    bottom = _np.asarray(dense_red["bottom"], dtype=_np.float32)[::-1]  # make left->right
-    left   = _np.asarray(dense_red["left"],   dtype=_np.float32)[::-1]  # make top->bottom
+    # ---- 1) Orient sides to consistent directions ----
+    # Generator conventions:
+    #   top:    left->right (already)
+    #   right:  top->bottom (already)
+    #   bottom: right->left  -> reverse to left->right
+    #   left:   bottom->top  -> reverse to top->bottom
+    top    = _np.asarray(dense_red["top"],    dtype=_np.float32)            # (W,3)
+    right  = _np.asarray(dense_red["right"],  dtype=_np.float32)            # (H,3)
+    bottom = _np.asarray(dense_red["bottom"], dtype=_np.float32)[::-1].copy()
+    left   = _np.asarray(dense_red["left"],   dtype=_np.float32)[::-1].copy()
 
     W = int(top.shape[0])
     H = int(right.shape[0])
     if bottom.shape[0] != W or left.shape[0] != H:
-        raise ValueError("Inconsistent dense_red lengths for Coons patch.")
+        raise ValueError("dense_red border lengths are inconsistent with image size.")
 
-    # ---- chord-length parameterization helpers ----
-    def _arcparam(P):
-        d = _np.linalg.norm(_np.diff(P[:, :3], axis=0), axis=1)
-        s = _np.concatenate([[0.0], _np.cumsum(d)])
-        s /= max(float(s[-1]), 1e-9)
-        return s
+    # ---- 2) Compute per-row scalar E(I) from XY distances (clamped to [0,1]) ----
+    # Corners in XY
+    top_xy    = top[:, :2]
+    bottom_xy = bottom[:, :2]
+    left_xy   = left[:, :2]
+    right_xy  = right[:, :2]
 
-    def _sample_curve(P, sP, t_vec):
-        """Linear interpolate on chord-length parameter t∈[0,1]."""
-        t = _np.clip(_np.asarray(t_vec, _np.float32), 0.0, 1.0)
-        idx = _np.searchsorted(sP, t, side='right') - 1
-        idx = _np.clip(idx, 0, len(sP) - 2)
-        t0 = sP[idx]; t1 = sP[idx + 1]
-        w  = (t - t0) / _np.maximum(t1 - t0, 1e-9)
-        P0 = P[idx]; P1 = P[idx + 1]
-        return P0 + (w[:, None] * (P1 - P0))
+    TL, TR = top_xy[0],    top_xy[-1]
+    BL, BR = bottom_xy[0], bottom_xy[-1]
 
-    # precompute arc-params
-    s_top    = _arcparam(top)
-    s_bottom = _arcparam(bottom)
-    s_left   = _arcparam(left)
-    s_right  = _arcparam(right)
+    TL_BL_len = float(_np.linalg.norm(TL - BL))
+    TR_BR_len = float(_np.linalg.norm(TR - BR))
+    if TL_BL_len <= 0.0: TL_BL_len = 1.0
+    if TR_BR_len <= 0.0: TR_BR_len = 1.0
 
-    # normalized grid params in pixel order
-    u = (_np.arange(W, dtype=_np.float32) / max(W - 1.0, 1.0))  # left->right
-    v = (_np.arange(H, dtype=_np.float32) / max(H - 1.0, 1.0))  # top->bottom
+    E1 = _np.linalg.norm(left_xy  - TL, axis=1) / TL_BL_len   # (H,)
+    E2 = _np.linalg.norm(right_xy - TR, axis=1) / TR_BR_len   # (H,)
+    E  = _np.clip(0.5 * (E1 + E2), 0.0, 1.0).astype(_np.float32)  # (H,)
 
-    # sample border curves at those parameters → aligned border samples
-    T = _sample_curve(top,    s_top,    u)   # (W,3)
-    B = _sample_curve(bottom, s_bottom, u)   # (W,3)
-    L = _sample_curve(left,   s_left,   v)   # (H,3)
-    R = _sample_curve(right,  s_right,  v)   # (H,3)
+    # ---- 3) Column-wise 3D interpolation from T(J) to B(J) using E(I) ----
+    T3 = top[None, :, :]                 # (1, W, 3)
+    dTB = (bottom - top)[None, :, :]     # (1, W, 3)
+    Ecol = E[:, None, None]              # (H, 1, 1)
 
-    # corners (consistent with directions)
-    TL, TR = T[0],  T[-1]
-    BL, BR = B[0],  B[-1]
-
-    # expand to grid
-    uu = u[None, :][:, :, None]   # (1,W,1)
-    vv = v[:, None][:, :, None]   # (H,1,1)
-
-    Tg = T[None, :, :]            # (1,W,3)
-    Bg = B[None, :, :]            # (1,W,3)
-    Lg = L[:, None, :]            # (H,1,3)
-    Rg = R[:, None, :]            # (H,1,3)
-
-    # ---- Coons patch on plane G (borders already lie on G) ----
-    # S(u,v) = (1-v)T(u) + vB(u) + (1-u)L(v) + uR(v)
-    #          - [(1-u)(1-v)TL + u(1-v)TR + (1-u)v BL + u v BR]
-    S = (1 - vv) * Tg + vv * Bg + (1 - uu) * Lg + uu * Rg \
-        - ((1 - uu) * (1 - vv) * TL
-           + uu * (1 - vv) * TR
-           + (1 - uu) * vv * BL
-           + uu * vv * BR)
-
+    S = T3 + Ecol * dTB                  # (H, W, 3) — on plane G
     unfolded_surface = S.astype(_np.float32, copy=False)
 
-    # pack aligned sides (useful for debugging/overlays)
-    sides = dict(top=T, right=R, bottom=B, left=L)
-
+    # ---- 4) Pack context (useful for debug/overlays) ----
+    sides = dict(top=top, right=right, bottom=bottom, left=left)
     context = dict(
         pcd=extras["pcd"],
         surface_interior_cg=extras["surface_interior_cg"],

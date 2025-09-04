@@ -55,7 +55,7 @@ def drop_depth(dpc, bpc, gpc):
     return dropped_dpc
 
 def calc_scale_factor(desired_altitude, pc_to_be_rescaled):
-    min_z = np.min(pc_to_be_rescaled[:,:,2])
+    min_z = np.nanmin(pc_to_be_rescaled[:,:,2])
     return desired_altitude / min_z
 
 def move_depth(depth_image, bg_image, gep_image):

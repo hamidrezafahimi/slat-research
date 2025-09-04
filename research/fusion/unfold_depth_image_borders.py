@@ -23,6 +23,7 @@ try:
 except Exception as e:
     raise SystemExit(f"Required modules not found: {e}\n"
                      f"Make sure Pose and project3DAndScale are importable like in depth2pcd.py")
+import json
 
 def main():
     ap = argparse.ArgumentParser(
@@ -93,6 +94,20 @@ def main():
         pose_kwargs=pose_kwargs,
         max_points=max_pts
     )
+
+    # --- NEW: save dense_red poses as JSON ---
+    out_json = os.path.splitext(args.metric_depth)[0] + "_dense_red.json"
+
+    # Convert numpy arrays to lists for JSON serialization
+    dense_red_serializable = {
+        side: arr.tolist() if arr is not None else None
+        for side, arr in result["dense_red"].items()
+    }
+
+    with open(out_json, "w") as f:
+        json.dump(dense_red_serializable, f, indent=2)
+
+    print(f"Saved dense_red poses to {out_json}")
 
     # Minimal console timing (heavier per-point logs stay guarded by vis_debug)
     print("Done in %.2f ms" % (1000.0 * (time.time() - t0)))
