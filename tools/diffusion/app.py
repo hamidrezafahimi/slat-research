@@ -133,7 +133,7 @@ def extent_wh_from_points(pts: np.ndarray):
 
 # ---------- App ----------
 class PointsApp:
-    def __init__(self, p, grid_w, grid_h, extra_cloud_path=None, save_path="spline_ctrl.csv", step=0.2):
+    def __init__(self, p, grid_w, grid_h, extra_cloud_path=None, save_path="spline_ctrl.csv", step=0.2, projectpc=False, calcloss=False):
         self.window = gui.Application.instance.create_window("Pick Points Demo", 1000, 750)
         self.scene = gui.SceneWidget()
         self.scene.scene = rendering.Open3DScene(self.window.renderer)
@@ -161,6 +161,14 @@ class PointsApp:
         self.ext_mat = rendering.MaterialRecord()
         self.ext_mat.shader = "defaultUnlit"
         self.ext_mat.point_size = 4.0
+
+        self.spline_pcd = None
+        self._kdt_xy = None
+        self._surf_xy = None
+        self._surf_z = None
+
+        self.projectpc = projectpc
+        self.calcloss = calcloss
 
         # Geometry: control points
         self.pcd = p
@@ -198,23 +206,128 @@ class PointsApp:
 
         self.window.set_on_key(self.on_key)
         self.scene.set_on_mouse(self.on_mouse)
+        if self.projectpc:
+            self._build_xy_kdtree()
+            self._show_or_refresh_spline_pcd()
+
+        if self.calcloss:
+            self._print_loss_if_available()
+
+
+    def _build_xy_kdtree(self):
+        """
+        Build a KD-tree over the surface vertices in XY for fast vertical projection.
+        We store vertices as (x, y, 0) so we can use Open3D's 3D KD-tree for 2D XY.
+        """
+        if self.surf_mesh is None:
+            self._kdt_xy = None
+            return
+        verts = np.asarray(self.surf_mesh.vertices)
+        if verts.size == 0:
+            self._kdt_xy = None
+            return
+        self._surf_xy = verts[:, :2].copy()
+        self._surf_z = verts[:, 2].copy()
+        # Pack XY into 3D by padding zeros on Z
+        xy0 = np.column_stack([self._surf_xy, np.zeros((self._surf_xy.shape[0],), dtype=self._surf_xy.dtype)])
+        pc_xy = o3d.geometry.PointCloud()
+        pc_xy.points = o3d.utility.Vector3dVector(xy0)
+        self._kdt_xy = o3d.geometry.KDTreeFlann(pc_xy)
+
+    def _interp_z_at_xy(self, x: float, y: float, k: int = 3, eps: float = 1e-9) -> float:
+        """
+        Inverse-distance-weighted interpolation of surface z at (x, y)
+        using k-nearest XY vertices of the sampled spline surface.
+        Assumes the surface is single-valued in z over XY.
+        """
+        if self._kdt_xy is None or self._surf_z is None:
+            self._build_xy_kdtree()
+            if self._kdt_xy is None:
+                return 0.0
+        q = np.array([x, y, 0.0], dtype=float)
+        # returns (count, indices, dists2)
+        count, idxs, d2 = self._kdt_xy.search_knn_vector_3d(q, max(1, k))
+        if count == 0:
+            return 0.0
+        d = np.sqrt(np.asarray(d2, dtype=float)) + eps
+        w = 1.0 / d
+        z = float(np.dot(w, self._surf_z[np.asarray(idxs, dtype=int)]) / np.sum(w))
+        return z
+
+    def _rebuild_spline_pcd(self):
+        """
+        Build/refresh spline_pcd by vertically projecting each external point E(x,y,ze)
+        onto the spline surface: S(x, y, z_surf(x,y)).
+        """
+        if self.external_pcd is None or self.surf_mesh is None:
+            self.spline_pcd = None
+            return
+        ext = np.asarray(self.external_pcd.points)
+        if ext.size == 0:
+            self.spline_pcd = None
+            return
+
+        # Compute z_surf for each (x,y) from external cloud
+        zs = np.empty((ext.shape[0],), dtype=float)
+        for i, (x, y, _) in enumerate(ext):
+            zs[i] = self._interp_z_at_xy(x, y, k=3)
+
+        spline_pts = np.column_stack([ext[:, 0], ext[:, 1], zs])
+        sp = o3d.geometry.PointCloud()
+        sp.points = o3d.utility.Vector3dVector(spline_pts)
+        # optional: a distinct color
+        sp.paint_uniform_color([0.1, 0.7, 1.0])  # cyan-ish
+        self.spline_pcd = sp
+
+    def _show_or_refresh_spline_pcd(self):
+        """
+        Add or update the spline_pcd geometry in the scene.
+        """
+        self._rebuild_spline_pcd()
+        if self.spline_pcd is None:
+            return
+        name = "spline_pcd"
+        if self.scene.scene.has_geometry(name):
+            self.scene.scene.remove_geometry(name)
+        mat = rendering.MaterialRecord()
+        mat.shader = "defaultUnlit"
+        mat.point_size = 2.0
+        self.scene.scene.add_geometry(name, self.spline_pcd, mat)
+
+    def calcLoss(self):
+        """
+        loss = ( #points in external cloud above the spline - #points below ) / 2
+        'Above/below' is based on vertical comparison at identical (x,y):
+        - For each external point E(x,y,z_e) we compute z_s = z_surf(x,y)
+        - If z_e > z_s => 'above'; if z_e < z_s => 'below'
+        """
+        if self.external_pcd is None or self.spline_pcd is None:
+            return None
+        z_ext = np.asarray(self.external_pcd.points)[:, 2]
+        z_spl = np.asarray(self.spline_pcd.points)[:, 2]
+        if z_ext.shape[0] == 0 or z_ext.shape[0] != z_spl.shape[0]:
+            return None
+        above = int(np.sum(z_ext > z_spl))
+        below = int(np.sum(z_ext < z_spl))
+        return 0.5 * (above - below)
+
+    def _print_loss_if_available(self):
+        val = self.calcLoss()
+        if val is not None:
+            print(f"[LOSS] {val:.6f}")
 
     # --- External cloud loader ---
     def add_external_cloud(self, path: str):
         p = o3d.io.read_point_cloud(path)
-        if len(p.points) == 0:
-            print(f"[WARN] External cloud at '{path}' has 0 points or failed to load.")
-            return
-        if not p.has_colors():
-            colors = np.tile(np.array([[0.5, 0.5, 0.5]]), (len(p.points), 1))
-            p.colors = o3d.utility.Vector3dVector(colors)
         self.external_pcd = p
-        try:
-            self.scene.scene.remove_geometry("external_pcd")
-        except Exception:
-            pass
         self.scene.scene.add_geometry("external_pcd", self.external_pcd, self.ext_mat)
         print(f"[OK] Loaded external point cloud: {path}  (#pts={len(p.points)})")
+
+        if self.projectpc:
+            self._show_or_refresh_spline_pcd()
+        if self.calcloss:
+            self._print_loss_if_available()
+
 
     # --- Utilities ---
     def rc2idx(self, r, c):
@@ -247,6 +360,11 @@ class PointsApp:
         self.scene.scene.remove_geometry("spline_surf")
         self.surf_mesh = self._build_surface_mesh(self.points)
         self.scene.scene.add_geometry("spline_surf", self.surf_mesh, self.surf_mat)
+        if self.projectpc:
+            self._build_xy_kdtree()
+            self._show_or_refresh_spline_pcd()
+        if self.calcloss:
+            self._print_loss_if_available()
 
     def _fit_camera_to_all(self):
         geoms = [self.pcd, self.surf_mesh]
@@ -274,6 +392,11 @@ class PointsApp:
     def _save_ctrl_points(self):
         np.savetxt(self.save_path, self.points, fmt="%.6f", delimiter=",")
         print(f"[OK] Saved {len(self.points)} control points to '{self.save_path}'")
+        if self.projectpc and self.spline_pcd is not None:
+            out_path = self.save_path.replace(".csv", "_splinepcd.pcd")
+            o3d.io.write_point_cloud(out_path, self.spline_pcd)
+            print(f"[OK] Saved spline_pcd to {out_path}")
+        return True
 
     # --- New: sync row/column z-values to active ctrl ---
     def _sync_row_to_active(self):
@@ -394,10 +517,20 @@ if __name__ == "__main__":
     parser.add_argument("--metric_w", type=float, help="Metric width (extent in X)")
     parser.add_argument("--metric_h", type=float, help="Metric height (extent in Y)")
 
+    parser.add_argument("--projectpc", action="store_true",
+                    help="If set, compute spline_pcd (vertical projection of external pcd) and render it.")
+    parser.add_argument("--calcloss", action="store_true",
+                    help="If set, calculate and print loss after each update.")
+
     # Load from CSV
     parser.add_argument("--spline_data", type=str, default=None, help="CSV file with Nx3 control points. If set, do NOT pass grid/metric sizes.")
 
     args = parser.parse_args()
+
+    if args.cloud is None:
+        import sys
+        print("[ERROR] --cloud <path-to-pcd> is required.")
+        sys.exit(1)
 
     # Validate argument combinations
     if args.spline_data is not None:
@@ -428,5 +561,10 @@ if __name__ == "__main__":
 
     gui.Application.instance.initialize()
     print_keymap(args.out, args.step)
-    app = PointsApp(pcd, GRID_W, GRID_H, extra_cloud_path=args.cloud, save_path=args.out, step=args.step)
+    app = PointsApp(pcd, GRID_W, GRID_H,
+                extra_cloud_path=args.cloud,
+                step=args.step,
+                save_path=args.out,
+                projectpc=args.projectpc,
+                calcloss=args.calcloss)
     app.run()
