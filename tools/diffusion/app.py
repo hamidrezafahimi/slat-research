@@ -1,570 +1,243 @@
 #!/usr/bin/env python3
-import argparse
-import sys
+import argparse, sys
 import numpy as np
 import open3d as o3d
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
 
-# ---------- B-spline helpers (clamped uniform cubic) ----------
-def clamped_uniform_knot_vector(n_ctrl: int, degree: int):
-    p = degree
-    m = n_ctrl + p + 1              # length of knot vector
-    kv = np.zeros(m, dtype=float)
-    kv[:p+1] = 0.0
-    kv[-(p+1):] = 1.0
-    interior_count = n_ctrl - p - 1
-    if interior_count > 0:
-        interior = np.linspace(0.0, 1.0, interior_count + 2)[1:-1]
-        kv[p+1 : m-(p+1)] = interior
-    return kv
+from helper import (
+    build_surface_mesh, make_o3d_pcd, make_grid_points,
+    load_ctrl_points_csv, infer_grid_wh_from_points, extent_wh_from_points_xy,
+    project_external_to_surface_idw, calc_loss, project_mode_dedup, project_mode_indirect,
+    project_mode_original
+)
 
-def bspline_basis_all(n_ctrl: int, degree: int, kv: np.ndarray, t: float):
-    p = degree
-    lo, hi = kv[p], kv[-p-1]
-    if t <= lo: t = lo + 1e-12
-    if t >= hi: t = hi - 1e-12
-    t = np.clip(t, kv[p], kv[-p-1] - 1e-12 if p > 0 else kv[-1])
-
-    N = np.zeros(n_ctrl)
-    tmp = np.zeros(len(kv) - 1, dtype=float)
-    for j in range(len(tmp)):
-        tmp[j] = 1.0 if (kv[j] <= t < kv[j+1]) else 0.0
-    for d in range(1, p+1):
-        for j in range(len(tmp) - d):
-            left = 0.0
-            right = 0.0
-            denom_left = kv[j+d] - kv[j]
-            denom_right = kv[j+d+1] - kv[j+1]
-            if denom_left > 0:
-                left = (t - kv[j]) / denom_left * tmp[j]
-            if denom_right > 0:
-                right = (kv[j+d+1] - t) / denom_right * tmp[j+1]
-            tmp[j] = left + right
-    N[:n_ctrl] = tmp[:n_ctrl]
-    return N
-
-def sample_bspline_surface(ctrl_pts, gw, gh, samples_u=40, samples_v=40):
-    p = 3  # cubic
-    q = 3
-    U = clamped_uniform_knot_vector(gw, p)
-    V = clamped_uniform_knot_vector(gh, q)
-
-    us = np.linspace(0, 1, samples_u)
-    vs = np.linspace(0, 1, samples_v)
-    Bu = np.stack([bspline_basis_all(gw, p, U, u) for u in us], axis=0)  # (Mu, gw)
-    Bv = np.stack([bspline_basis_all(gh, q, V, v) for v in vs], axis=0)  # (Mv, gh)
-
-    P = ctrl_pts.reshape(gh, gw, 3)  # (r,c,3)
-    S = np.zeros((samples_v, samples_u, 3), dtype=float)
-    for k in range(3):
-        Gk = P[..., k]
-        inner_u = np.tensordot(Bu, Gk.transpose(0,1), axes=(1,1))      # (Mu, gh)
-        S[..., k] = np.tensordot(Bv, inner_u.transpose(1,0), axes=(1,0))  # (Mv, Mu)
-
-    verts = S.reshape(-1, 3)
-    tris = []
-    for j in range(samples_v - 1):
-        for i in range(samples_u - 1):
-            a = j * samples_u + i
-            b = a + 1
-            c = a + samples_u
-            d = c + 1
-            tris.append([a, c, b])
-            tris.append([b, c, d])
-    tris = np.asarray(tris, dtype=np.int32)
-    return verts, tris
-
-# ---------- Grid factory ----------
-def make_grid(grid_w, grid_h, metric_w, metric_h):
-    xs = np.linspace(-metric_w/2, metric_w/2, grid_w)
-    ys = np.linspace(-metric_h/2, metric_h/2, grid_h)
-    xx, yy = np.meshgrid(xs, ys)
-    zz = np.zeros_like(xx)
-    pts = np.column_stack((xx.ravel(), yy.ravel(), zz.ravel()))
-    colors = np.tile(np.array([[0.2, 0.8, 1.0]]), (len(pts), 1))
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(pts)
-    pcd.colors = o3d.utility.Vector3dVector(colors)
-    return pcd
-
-# ---------- Utilities for CSV IO ----------
-def load_ctrl_points_csv(path: str) -> np.ndarray:
-    try:
-        arr = np.loadtxt(path, delimiter=",")
-    except Exception:
-        # try whitespace
-        arr = np.loadtxt(path)
-    if arr.ndim == 1:
-        arr = arr.reshape(-1, 3)
-    if arr.shape[1] != 3:
-        raise ValueError(f"Expected Nx3 CSV, got shape {arr.shape}")
-    return arr.astype(float)
-
-def infer_grid_wh_from_points(pts: np.ndarray, tol=1e-8):
-    """Infer (grid_w, grid_h) by counting unique X and Y (with tolerance)."""
-    xs = pts[:, 0]
-    ys = pts[:, 1]
-    # Round to kill tiny noise
-    xr = np.round(xs / max(np.max(np.abs(xs)), 1.0) * 1e8) if np.max(np.abs(xs)) > 0 else xs
-    yr = np.round(ys / max(np.max(np.abs(ys)), 1.0) * 1e8) if np.max(np.abs(ys)) > 0 else ys
-    uniq_x = np.unique(xr)
-    uniq_y = np.unique(yr)
-    gw = len(uniq_x)
-    gh = len(uniq_y)
-    if gw * gh != pts.shape[0]:
-        # fallback: try to guess a reasonable rectangular factorization
-        n = pts.shape[0]
-        facs = [(w, n // w) for w in range(2, n + 1) if n % w == 0]
-        # Prefer shapes with w close to number of unique x values
-        facs.sort(key=lambda ab: abs(ab[0] - gw))
-        if facs:
-            gw, gh = facs[0]
-        else:
-            raise ValueError("Cannot infer a rectangular grid from the CSV points.")
-    return int(gw), int(gh)
-
-def extent_wh_from_points(pts: np.ndarray):
-    mins = pts[:, :2].min(axis=0)
-    maxs = pts[:, :2].max(axis=0)
-    metric_w = float(maxs[0] - mins[0])
-    metric_h = float(maxs[1] - mins[1])
-    return metric_w, metric_h
-
-# ---------- App ----------
 class PointsApp:
-    def __init__(self, p, grid_w, grid_h, extra_cloud_path=None, save_path="spline_ctrl.csv", step=0.2, projectpc=False, calcloss=False):
-        self.window = gui.Application.instance.create_window("Pick Points Demo", 1000, 750)
-        self.scene = gui.SceneWidget()
-        self.scene.scene = rendering.Open3DScene(self.window.renderer)
+    def __init__(self, ctrl_pcd, grid_w, grid_h, extra_cloud_path=None,
+                 save_path="spline_ctrl.csv", step=0.2,
+                 samples_u=40, samples_v=40, loss_thresh=0.2, k=3, eps=1e-9,
+                 proj_method="original", xy_cell=0.02):
+        self.window = gui.Application.instance.create_window("Spline Editor", 1000, 750)
+        self.scene = gui.SceneWidget(); self.scene.scene = rendering.Open3DScene(self.window.renderer)
         self.window.add_child(self.scene)
 
-        self.grid_w = grid_w
-        self.grid_h = grid_h
+        self.grid_w, self.grid_h = int(grid_w), int(grid_h)
         self.save_path = save_path
         self.step = float(step)
+        self.samples_u, self.samples_v = int(samples_u), int(samples_v)
+        self.loss_thresh = float(loss_thresh)
+        self.k = int(k); self.eps = float(eps)
 
-        # Materials
-        self.points_mat = rendering.MaterialRecord()
-        self.points_mat.shader = "defaultUnlit"
-        self.points_mat.point_size = 10.0
+        # Geometries
+        self.ctrl_pcd = ctrl_pcd
+        self.points = np.asarray(self.ctrl_pcd.points)
+        self.scene.scene.add_geometry("points", self.ctrl_pcd, self._mat_points(10.0))
+        self.surf_mesh = build_surface_mesh(self.points, self.grid_w, self.grid_h, self.samples_u, self.samples_v)
+        self.scene.scene.add_geometry("spline_surf", self.surf_mesh, self._mat_mesh())
 
-        # SOLID surface material
-        self.surf_mat = rendering.MaterialRecord()
-        self.surf_mat.shader = "defaultLit"
-        self.surf_mat.base_color = (0.7, 0.7, 0.9, 1.0)
-        self.surf_mat.base_metallic = 0.0
-        self.surf_mat.base_roughness = 0.8
-        self.surf_mat.base_reflectance = 0.5
+        self.external_pcd = None
+        if extra_cloud_path:
+            self.external_pcd = o3d.io.read_point_cloud(extra_cloud_path)
+            self.scene.scene.add_geometry("external_pcd", self.external_pcd, self._mat_points(4.0))
 
-        # External cloud material
-        self.ext_mat = rendering.MaterialRecord()
-        self.ext_mat.shader = "defaultUnlit"
-        self.ext_mat.point_size = 4.0
+        axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=2.0, origin=[0,0,0])
+        self.scene.scene.add_geometry("axis", axis, rendering.MaterialRecord())
+
+        self.cur_r, self.cur_c = 0, 0
+        self._colors = np.asarray(self.ctrl_pcd.colors)
+        if self._colors.size == 0:
+            self._colors = np.tile(np.array([[0.2, 0.8, 1.0]]), (self.points.shape[0], 1))
+            self.ctrl_pcd.colors = o3d.utility.Vector3dVector(self._colors)
+        self._highlight((self.cur_r, self.cur_c))
 
         self.spline_pcd = None
-        self._kdt_xy = None
-        self._surf_xy = None
-        self._surf_z = None
-
-        self.projectpc = projectpc
-        self.calcloss = calcloss
-
-        # Geometry: control points
-        self.pcd = p
-        self.scene.scene.add_geometry("points", self.pcd, self.points_mat)
-
-        # Colors
-        self.base_color = np.array([0.2, 0.8, 1.0])
-        self.highlight_color = np.array([1.0, 0.0, 0.0])
-        self.colors = np.asarray(self.pcd.colors).copy()
-
-        # Editable control points
-        self.points = np.asarray(self.pcd.points)
-
-        # Selection
-        self.cur_r, self.cur_c = 0, 0
-        self._apply_highlight(None, (self.cur_r, self.cur_c))
-
-        # Axes
-        axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=2.0, origin=[0, 0, 0])
-        axis_mat = rendering.MaterialRecord()
-        axis_mat.shader = "defaultLit"
-        self.scene.scene.add_geometry("axis", axis, axis_mat)
-
-        # Initial B-spline surface
-        self.surf_mesh = self._build_surface_mesh(self.points)
-        self.scene.scene.add_geometry("spline_surf", self.surf_mesh, self.surf_mat)
-
-        # Optional: load extra point cloud
-        self.external_pcd = None
-        if extra_cloud_path is not None:
-            self.add_external_cloud(extra_cloud_path)
-
-        # Camera — fit to all geometry present
-        self._fit_camera_to_all()
-
         self.window.set_on_key(self.on_key)
-        self.scene.set_on_mouse(self.on_mouse)
-        if self.projectpc:
-            self._build_xy_kdtree()
-            self._show_or_refresh_spline_pcd()
+        self.k = int(k); self.eps = float(eps)
+        self.proj_method = str(proj_method)
+        self.xy_cell = float(xy_cell)
 
-        if self.calcloss:
-            self._print_loss_if_available()
+    # ---- Materials
+    def _mat_points(self, size=4.0):
+        m = rendering.MaterialRecord(); m.shader = "defaultUnlit"; m.point_size = float(size); return m
+    def _mat_mesh(self):
+        m = rendering.MaterialRecord(); m.shader = "defaultLit"; m.base_color=(0.7,0.7,0.9,1.0); m.base_roughness=0.8; return m
 
+    # ---- Helpers
+    def rc2idx(self, r, c): return r*self.grid_w + c
+    def _refresh_points_geom(self):
+        self.ctrl_pcd.points = o3d.utility.Vector3dVector(self.points)
+        self.ctrl_pcd.colors = o3d.utility.Vector3dVector(self._colors)
+        self.scene.scene.remove_geometry("points"); self.scene.scene.add_geometry("points", self.ctrl_pcd, self._mat_points(10.0))
+    def _highlight(self, rc):
+        r,c = rc
+        self._colors[:] = [0.2,0.8,1.0]; self._colors[self.rc2idx(r,c)] = [1.0,0.0,0.0]
+        self._refresh_points_geom()
+    def _update_surface(self):
+        if self.scene.scene.has_geometry("spline_surf"):
+            self.scene.scene.remove_geometry("spline_surf")
+        self.surf_mesh = build_surface_mesh(self.points, self.grid_w, self.grid_h, self.samples_u, self.samples_v)
+        self.scene.scene.add_geometry("spline_surf", self.surf_mesh, self._mat_mesh())
+        if self.scene.scene.has_geometry("spline_pcd"):
+            self.scene.scene.remove_geometry("spline_pcd")
+        self.spline_pcd = None
 
-    def _build_xy_kdtree(self):
-        """
-        Build a KD-tree over the surface vertices in XY for fast vertical projection.
-        We store vertices as (x, y, 0) so we can use Open3D's 3D KD-tree for 2D XY.
-        """
-        if self.surf_mesh is None:
-            self._kdt_xy = None
-            return
-        verts = np.asarray(self.surf_mesh.vertices)
-        if verts.size == 0:
-            self._kdt_xy = None
-            return
-        self._surf_xy = verts[:, :2].copy()
-        self._surf_z = verts[:, 2].copy()
-        # Pack XY into 3D by padding zeros on Z
-        xy0 = np.column_stack([self._surf_xy, np.zeros((self._surf_xy.shape[0],), dtype=self._surf_xy.dtype)])
-        pc_xy = o3d.geometry.PointCloud()
-        pc_xy.points = o3d.utility.Vector3dVector(xy0)
-        self._kdt_xy = o3d.geometry.KDTreeFlann(pc_xy)
-
-    def _interp_z_at_xy(self, x: float, y: float, k: int = 3, eps: float = 1e-9) -> float:
-        """
-        Inverse-distance-weighted interpolation of surface z at (x, y)
-        using k-nearest XY vertices of the sampled spline surface.
-        Assumes the surface is single-valued in z over XY.
-        """
-        if self._kdt_xy is None or self._surf_z is None:
-            self._build_xy_kdtree()
-            if self._kdt_xy is None:
-                return 0.0
-        q = np.array([x, y, 0.0], dtype=float)
-        # returns (count, indices, dists2)
-        count, idxs, d2 = self._kdt_xy.search_knn_vector_3d(q, max(1, k))
-        if count == 0:
-            return 0.0
-        d = np.sqrt(np.asarray(d2, dtype=float)) + eps
-        w = 1.0 / d
-        z = float(np.dot(w, self._surf_z[np.asarray(idxs, dtype=int)]) / np.sum(w))
-        return z
-
-    def _rebuild_spline_pcd(self):
-        """
-        Build/refresh spline_pcd by vertically projecting each external point E(x,y,ze)
-        onto the spline surface: S(x, y, z_surf(x,y)).
-        """
-        if self.external_pcd is None or self.surf_mesh is None:
-            self.spline_pcd = None
-            return
+    def _project_and_render(self):
+        if self.external_pcd is None:
+            print("[INFO] Need external cloud to project."); return
         ext = np.asarray(self.external_pcd.points)
         if ext.size == 0:
-            self.spline_pcd = None
+            print("[INFO] External cloud is empty."); return
+
+        if self.proj_method == "original":
+            spline_pts, colors, loss_val = \
+                project_mode_original(ext, self.surf_mesh, self.k, self.eps, self.loss_thresh)
+            msg = f"[LOSS] {loss_val} (|Δz|>{self.loss_thresh:g})"
+
+        elif self.proj_method == "indirect":
+            spline_pts, colors, loss_val = \
+                project_mode_indirect(ext, self.surf_mesh, self.k, self.eps, self.xy_cell, self.loss_thresh)
+            msg = (f"[LOSS] {loss_val} "
+                f"(indirect: {spline_pts.shape[0]} cell-centers, xy_cell={self.xy_cell:g}, "
+                f"|Δz|>{self.loss_thresh:g})")
+
+        elif self.proj_method == "dedup":
+            spline_pts, colors, loss_val = \
+                project_mode_dedup(ext, self.surf_mesh, self.samples_u, self.samples_v,
+                                self.k, self.eps, self.loss_thresh)
+            msg = f"[LOSS] {loss_val} (dedup by {self.samples_u}×{self.samples_v} XY cells)"
+
+        else:
+            print(f"[ERROR] Unknown proj_method: {self.proj_method}")
             return
 
-        # Compute z_surf for each (x,y) from external cloud
-        zs = np.empty((ext.shape[0],), dtype=float)
-        for i, (x, y, _) in enumerate(ext):
-            zs[i] = self._interp_z_at_xy(x, y, k=3)
-
-        spline_pts = np.column_stack([ext[:, 0], ext[:, 1], zs])
         sp = o3d.geometry.PointCloud()
         sp.points = o3d.utility.Vector3dVector(spline_pts)
-        # optional: a distinct color
-        sp.paint_uniform_color([0.1, 0.7, 1.0])  # cyan-ish
+        if colors is None or colors.size == 0:
+            colors = np.tile(np.array([[0.2, 0.9, 1.0]], dtype=float), (spline_pts.shape[0], 1))
+        sp.colors = o3d.utility.Vector3dVector(colors)
         self.spline_pcd = sp
 
-    def _show_or_refresh_spline_pcd(self):
-        """
-        Add or update the spline_pcd geometry in the scene.
-        """
-        self._rebuild_spline_pcd()
-        if self.spline_pcd is None:
-            return
         name = "spline_pcd"
         if self.scene.scene.has_geometry(name):
             self.scene.scene.remove_geometry(name)
-        mat = rendering.MaterialRecord()
-        mat.shader = "defaultUnlit"
-        mat.point_size = 2.0
-        self.scene.scene.add_geometry(name, self.spline_pcd, mat)
+        self.scene.scene.add_geometry(name, self.spline_pcd, self._mat_points(2.0))
+        print(msg)
 
     def calcLoss(self):
-        """
-        loss = ( #points in external cloud above the spline - #points below ) / 2
-        'Above/below' is based on vertical comparison at identical (x,y):
-        - For each external point E(x,y,z_e) we compute z_s = z_surf(x,y)
-        - If z_e > z_s => 'above'; if z_e < z_s => 'below'
-        """
         if self.external_pcd is None or self.spline_pcd is None:
             return None
-        z_ext = np.asarray(self.external_pcd.points)[:, 2]
-        z_spl = np.asarray(self.spline_pcd.points)[:, 2]
-        if z_ext.shape[0] == 0 or z_ext.shape[0] != z_spl.shape[0]:
-            return None
-        above = int(np.sum(z_ext > z_spl))
-        below = int(np.sum(z_ext < z_spl))
-        return 0.5 * (above - below)
+        ext = np.asarray(self.external_pcd.points)
+        spl = np.asarray(self.spline_pcd.points)
+        loss_val, mask, _ = calc_loss(ext, spl, self.loss_thresh)
+        return loss_val
 
-    def _print_loss_if_available(self):
-        val = self.calcLoss()
-        if val is not None:
-            print(f"[LOSS] {val:.6f}")
+    # ---- Key handling (parity with old app)
+    def on_key(self, e):
+        if e.type != gui.KeyEvent.Type.DOWN: return False
+        moved = False; r,c = self.cur_r, self.cur_c; idx = self.rc2idx(r,c)
 
-    # --- External cloud loader ---
-    def add_external_cloud(self, path: str):
-        p = o3d.io.read_point_cloud(path)
-        self.external_pcd = p
-        self.scene.scene.add_geometry("external_pcd", self.external_pcd, self.ext_mat)
-        print(f"[OK] Loaded external point cloud: {path}  (#pts={len(p.points)})")
+        if e.key == gui.KeyName.LEFT:  self.cur_c = max(0, c-1); moved=True
+        elif e.key == gui.KeyName.RIGHT:self.cur_c = min(self.grid_w-1, c+1); moved=True
+        elif e.key == gui.KeyName.UP:   self.cur_r = min(self.grid_h-1, r+1); moved=True
+        elif e.key == gui.KeyName.DOWN: self.cur_r = max(0, r-1); moved=True
 
-        if self.projectpc:
-            self._show_or_refresh_spline_pcd()
-        if self.calcloss:
-            self._print_loss_if_available()
+        elif e.key == gui.KeyName.U: self.points[idx,2]+=self.step; self._update_surface(); self._highlight((self.cur_r,self.cur_c)); return True
+        elif e.key == gui.KeyName.I: self.points[idx,2]-=self.step; self._update_surface(); self._highlight((self.cur_r,self.cur_c)); return True
 
+        elif e.key == gui.KeyName.O:  # sync row z to active z
+            z = float(self.points[idx,2]); s = self.cur_r*self.grid_w; self.points[s:s+self.grid_w,2] = z
+            self._update_surface(); self._highlight((self.cur_r,self.cur_c)); return True
+        elif e.key == gui.KeyName.P:  # sync col z to active z
+            z = float(self.points[idx,2]); col_idx = [self.rc2idx(rr,self.cur_c) for rr in range(self.grid_h)]
+            self.points[col_idx,2] = z; self._update_surface(); self._highlight((self.cur_r,self.cur_c)); return True
 
-    # --- Utilities ---
-    def rc2idx(self, r, c):
-        return r * self.grid_w + c
+        elif e.key == gui.KeyName.W: self.points[:,1]+=self.step; self._update_surface(); self._highlight((self.cur_r,self.cur_c)); return True
+        elif e.key == gui.KeyName.S: self.points[:,1]-=self.step; self._update_surface(); self._highlight((self.cur_r,self.cur_c)); return True
+        elif e.key == gui.KeyName.A: self.points[:,0]-=self.step; self._update_surface(); self._highlight((self.cur_r,self.cur_c)); return True
+        elif e.key == gui.KeyName.D: self.points[:,0]+=self.step; self._update_surface(); self._highlight((self.cur_r,self.cur_c)); return True
+        elif e.key == gui.KeyName.C: self.points[:,2]-=self.step; self._update_surface(); self._highlight((self.cur_r,self.cur_c)); return True
+        elif e.key == gui.KeyName.V: self.points[:,2]+=self.step; self._update_surface(); self._highlight((self.cur_r,self.cur_c)); return True
 
-    def _apply_highlight(self, prev_rc, new_rc):
-        if prev_rc is not None:
-            pr, pc = prev_rc
-            self.colors[self.rc2idx(pr, pc)] = self.base_color
-        nr, nc = new_rc
-        self.colors[self.rc2idx(nr, nc)] = self.highlight_color
-        self.pcd.colors = o3d.utility.Vector3dVector(self.colors)
-        self.pcd.points = o3d.utility.Vector3dVector(self.points)
-        self.scene.scene.remove_geometry("points")
-        self.scene.scene.add_geometry("points", self.pcd, self.points_mat)
-        # print(f"Selected ctrl (row, col): ({nr}, {nc})  idx={self.rc2idx(nr, nc)}  pos={self.points[self.rc2idx(nr, nc)]}")
-
-    def _build_surface_mesh(self, ctrl_points):
-        verts, tris = sample_bspline_surface(
-            ctrl_points, self.grid_w, self.grid_h,
-            samples_u=40, samples_v=40
-        )
-        mesh = o3d.geometry.TriangleMesh()
-        mesh.vertices = o3d.utility.Vector3dVector(verts)
-        mesh.triangles = o3d.utility.Vector3iVector(tris)
-        mesh.compute_vertex_normals()
-        return mesh
-
-    def _update_surface(self):
-        self.scene.scene.remove_geometry("spline_surf")
-        self.surf_mesh = self._build_surface_mesh(self.points)
-        self.scene.scene.add_geometry("spline_surf", self.surf_mesh, self.surf_mat)
-        if self.projectpc:
-            self._build_xy_kdtree()
-            self._show_or_refresh_spline_pcd()
-        if self.calcloss:
-            self._print_loss_if_available()
-
-    def _fit_camera_to_all(self):
-        geoms = [self.pcd, self.surf_mesh]
-        if self.external_pcd is not None:
-            geoms.append(self.external_pcd)
-        mins = []
-        maxs = []
-        for g in geoms:
-            aabb = g.get_axis_aligned_bounding_box()
-            mins.append(np.asarray(aabb.min_bound))
-            maxs.append(np.asarray(aabb.max_bound))
-        mins = np.vstack(mins).min(axis=0)
-        maxs = np.vstack(maxs).max(axis=0)
-        big = o3d.geometry.AxisAlignedBoundingBox(mins, maxs)
-        self.scene.setup_camera(60, big, big.get_center())
-
-    def _translate_all(self, dx=0.0, dy=0.0, dz=0.0):
-        self.points[:, 0] += dx
-        self.points[:, 1] += dy
-        self.points[:, 2] += dz
-        self._apply_highlight((self.cur_r, self.cur_c), (self.cur_r, self.cur_c))
-        self._update_surface()
-        # print(f"Translated grid by ({dx:.3f}, {dy:.3f}, {dz:.3f})")
-
-    def _save_ctrl_points(self):
-        np.savetxt(self.save_path, self.points, fmt="%.6f", delimiter=",")
-        print(f"[OK] Saved {len(self.points)} control points to '{self.save_path}'")
-        if self.projectpc and self.spline_pcd is not None:
-            out_path = self.save_path.replace(".csv", "_splinepcd.pcd")
-            o3d.io.write_point_cloud(out_path, self.spline_pcd)
-            print(f"[OK] Saved spline_pcd to {out_path}")
-        return True
-
-    # --- New: sync row/column z-values to active ctrl ---
-    def _sync_row_to_active(self):
-        z = float(self.points[self.rc2idx(self.cur_r, self.cur_c), 2])
-        r = self.cur_r
-        start = r * self.grid_w
-        end = start + self.grid_w
-        self.points[start:end, 2] = z
-        # print(f"[ROW] Set row {r} z -> {z:.6f}")
-        self._apply_highlight((r, self.cur_c), (r, self.cur_c))
-        self._update_surface()
-
-    def _sync_col_to_active(self):
-        z = float(self.points[self.rc2idx(self.cur_r, self.cur_c), 2])
-        c = self.cur_c
-        idxs = [self.rc2idx(r, c) for r in range(self.grid_h)]
-        self.points[idxs, 2] = z
-        # print(f"[COL] Set col {c} z -> {z:.6f}")
-        self._apply_highlight((self.cur_r, c), (self.cur_r, c))
-        self._update_surface()
-
-    def on_key(self, event):
-        if event.type != gui.KeyEvent.Type.DOWN:
-            return False
-
-        prev = (self.cur_r, self.cur_c)
-        moved = False
-        idx = self.rc2idx(self.cur_r, self.cur_c)
-
-        if event.key == gui.KeyName.LEFT:
-            self.cur_c = max(0, self.cur_c - 1); moved = True
-        elif event.key == gui.KeyName.RIGHT:
-            self.cur_c = min(self.grid_w - 1, self.cur_c + 1); moved = True
-        elif event.key == gui.KeyName.UP:
-            self.cur_r = min(self.grid_h - 1, self.cur_r + 1); moved = True
-        elif event.key == gui.KeyName.DOWN:
-            self.cur_r = max(0, self.cur_r - 1); moved = True
-
-        # Raise/lower only selected ctrl (uses --step)
-        elif event.key == gui.KeyName.U:
-            self.points[idx, 2] += self.step
-            # print(f"Raised ctrl {idx} to z={self.points[idx,2]:.6f}")
-            self._apply_highlight((self.cur_r, self.cur_c), (self.cur_r, self.cur_c))
-            self._update_surface()
+        elif e.key == gui.KeyName.M: self._project_and_render(); return True
+        elif e.key == gui.KeyName.N:
+            val = self.calcLoss()
+            print("[INFO] Loss unavailable; need projection first." if val is None else f"[LOSS] {val}")
             return True
-        elif event.key == gui.KeyName.I:
-            self.points[idx, 2] -= self.step
-            # print(f"Lowered ctrl {idx} to z={self.points[idx,2]:.6f}")
-            self._apply_highlight((self.cur_r, self.cur_c), (self.cur_r, self.cur_c))
-            self._update_surface()
+        elif e.key == gui.KeyName.Y:
+            np.savetxt(self.save_path, self.points, fmt="%.6f", delimiter=",")
+            print(f"[OK] Saved control points → {self.save_path}")
+            if self.spline_pcd is not None:
+                out = self.save_path.replace(".csv", "_splinepcd.pcd")
+                o3d.io.write_point_cloud(out, self.spline_pcd)
+                print(f"[OK] Saved spline_pcd → {out}")
             return True
-
-        # New: sync same row/column z-values to active
-        elif event.key == gui.KeyName.O:
-            self._sync_row_to_active(); return True
-        elif event.key == gui.KeyName.P:
-            self._sync_col_to_active(); return True
-
-        # Global move whole spline+ctrls (uses --step)
-        elif event.key == gui.KeyName.W:   # up
-            self._translate_all(dy=self.step);   return True
-        elif event.key == gui.KeyName.S:   # down
-            self._translate_all(dy=-self.step);  return True
-        elif event.key == gui.KeyName.A:   # left
-            self._translate_all(dx=-self.step);  return True
-        elif event.key == gui.KeyName.D:   # right
-            self._translate_all(dx=self.step);   return True
-        elif event.key == gui.KeyName.C:   # drop
-            self._translate_all(dz=-self.step);  return True
-        elif event.key == gui.KeyName.V:   # lift
-            self._translate_all(dz=self.step);   return True
-
-        # Save
-        elif event.key == gui.KeyName.Y:
-            self._save_ctrl_points()
-            return True
-        elif event.key == gui.KeyName.Q:
-            print("[INFO] Quit requested (Q)")
-            gui.Application.instance.quit()
-            return True
+        elif e.key == gui.KeyName.Q:
+            gui.Application.instance.quit(); return True
         else:
             return False
 
-        if moved:
-            self._apply_highlight(prev, (self.cur_r, self.cur_c))
+        if moved: self._highlight((self.cur_r, self.cur_c))
         return True
 
-    def on_mouse(self, event):
-        if event.type == gui.MouseEvent.Type.BUTTON_DOWN:
-            return True
-        return False
+    def run(self): gui.Application.instance.run()
 
-    def run(self):
-        gui.Application.instance.run()
-
-def print_keymap(save_path, step):
+def print_keymap(save_path, step, proj_method):
     s = float(step)
     print("\n=== Keymap ===")
-    print("Arrow keys : move selection (row/col)")
-    print(f"U / I      : raise / lower selected control point (±{s:.3f} in z)")
-    print(f"W A S D    : move whole grid up/left/down/right (±{s:.3f} in x/y)")
-    print(f"V / C      : lift / drop whole grid (±{s:.3f} in z)")
-    print("O          : set entire row z to the active point's z")
-    print("P          : set entire column z to the active point's z")
-    print(f"Y          : save control points to '{save_path}'")
-    print("Q          : quit\n")
+    print("Arrows    : move selection (row/col)")
+    print(f"U / I     : raise / lower selected point (±{s:.3f} z)")
+    print(f"W/A/S/D   : translate grid in y/x (±{s:.3f})")
+    print(f"V / C     : lift / drop grid in z (±{s:.3f})")
+    print("O / P     : sync row / col z with active point")
+    print(f"M         : project (mode={proj_method})")
+    print("N         : print LOSS for last projection")
+    print(f"Y         : save control points to '{save_path}' (also saves spline_pcd if exists)")
+    print("Q         : quit\n")
 
-# ---------- Main ----------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Interactive B-spline surface editor with optional external cloud.")
-    parser.add_argument("--cloud", type=str, default=None, help="Path to extra point cloud (.ply/.pcd/.xyz/...)")
-    parser.add_argument("--out", type=str, default="spline_ctrl.csv", help="Path to save control points when pressing 'Y'")
-    parser.add_argument("--step", type=float, default=0.2, help="Movement step size for raise/lower and translations (world units)")
+    parser = argparse.ArgumentParser(description="Interactive B-spline editor (IDW projection + loss).")
+    parser.add_argument("--cloud", type=str, required=True, help="External point cloud (.pcd/.ply/.xyz)")
+    parser.add_argument("--out", type=str, default="spline_ctrl.csv")
+    parser.add_argument("--step", type=float, default=0.2)
+    parser.add_argument("--samples_u", type=int, default=40)
+    parser.add_argument("--samples_v", type=int, default=40)
+    parser.add_argument("--loss_thresh", type=float, default=0.2)
+    parser.add_argument("--k", type=int, default=3)
+    parser.add_argument("--eps", type=float, default=1e-9)
 
-    # Grid/metric arguments (used only when NOT loading from file)
-    parser.add_argument("--grid_w", type=int, help="Grid width (number of control points along X)")
-    parser.add_argument("--grid_h", type=int, help="Grid height (number of control points along Y)")
-    parser.add_argument("--metric_w", type=float, help="Metric width (extent in X)")
-    parser.add_argument("--metric_h", type=float, help="Metric height (extent in Y)")
-
-    parser.add_argument("--projectpc", action="store_true",
-                    help="If set, compute spline_pcd (vertical projection of external pcd) and render it.")
-    parser.add_argument("--calcloss", action="store_true",
-                    help="If set, calculate and print loss after each update.")
-
-    # Load from CSV
-    parser.add_argument("--spline_data", type=str, default=None, help="CSV file with Nx3 control points. If set, do NOT pass grid/metric sizes.")
+    # Option A: load control points
+    parser.add_argument("--spline_data", type=str, default=None, help="CSV Nx3 control points")
+    # Option B: generate flat grid if no CSV
+    parser.add_argument("--grid_w", type=int)
+    parser.add_argument("--grid_h", type=int)
+    parser.add_argument("--metric_w", type=float)
+    parser.add_argument("--metric_h", type=float)
+    parser.add_argument("--proj_method", type=str, default="indirect",
+                    choices=["original", "indirect", "dedup"],
+                    help="Projection mode for M: original | indirect | dedup")
+    parser.add_argument("--xy_cell", type=float, default=0.02,
+                    help="(indirect) XY grid cell size (meters) for occupancy sampling on z=0")
 
     args = parser.parse_args()
 
-    if args.cloud is None:
-        import sys
-        print("[ERROR] --cloud <path-to-pcd> is required.")
-        sys.exit(1)
-
-    # Validate argument combinations
     if args.spline_data is not None:
-        forbidden = [a for a in ("grid_w","grid_h","metric_w","metric_h") if getattr(args, a) is not None]
-        if forbidden:
-            print(f"[ERROR] When --spline_data is used, do NOT pass {forbidden}. The app infers grid/metric size from data.")
-            sys.exit(1)
-        # Load points and infer grid sizes and metrics
         pts = load_ctrl_points_csv(args.spline_data)
         gw, gh = infer_grid_wh_from_points(pts)
-        mw, mh = extent_wh_from_points(pts)
-        print(f"[OK] Loaded {pts.shape[0]} points from '{args.spline_data}'. Inferred grid: {gw}×{gh}, extents: W={mw:.3f}, H={mh:.3f}")
-        # Build point cloud
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(pts)
-        base_color = np.array([[0.2, 0.8, 1.0]])
-        pcd.colors = o3d.utility.Vector3dVector(np.tile(base_color, (len(pts), 1)))
+        ctrl_pcd = make_o3d_pcd(pts)
         GRID_W, GRID_H = gw, gh
     else:
-        # Require all four sizes if not loading from file
-        missing = [name for name in ("grid_w","grid_h","metric_w","metric_h") if getattr(args, name) is None]
+        missing = [n for n in ("grid_w","grid_h","metric_w","metric_h") if getattr(args, n) is None]
         if missing:
-            print(f"[ERROR] Missing required args: {missing}. Either provide all four OR use --spline_data.")
-            print("Example (no file): --grid_w 10 --grid_h 10 --metric_w 10 --metric_h 10")
-            sys.exit(1)
+            print(f"[ERROR] Missing {missing}. Provide all or use --spline_data."); sys.exit(1)
         GRID_W, GRID_H = args.grid_w, args.grid_h
-        pcd = make_grid(GRID_W, GRID_H, args.metric_w, args.metric_h)
+        pts = make_grid_points(GRID_W, GRID_H, args.metric_w, args.metric_h)
+        ctrl_pcd = make_o3d_pcd(pts)
 
     gui.Application.instance.initialize()
-    print_keymap(args.out, args.step)
-    app = PointsApp(pcd, GRID_W, GRID_H,
-                extra_cloud_path=args.cloud,
-                step=args.step,
-                save_path=args.out,
-                projectpc=args.projectpc,
-                calcloss=args.calcloss)
-    app.run()
+    print_keymap(args.out, args.step, args.proj_method)
+    PointsApp(ctrl_pcd, GRID_W, GRID_H,
+            extra_cloud_path=args.cloud,
+            save_path=args.out, step=args.step,
+            samples_u=args.samples_u, samples_v=args.samples_v,
+            loss_thresh=args.loss_thresh, k=args.k, eps=args.eps,
+            proj_method=args.proj_method, xy_cell=args.xy_cell).run()
