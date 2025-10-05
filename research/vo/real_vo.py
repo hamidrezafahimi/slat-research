@@ -5,7 +5,7 @@ sys.path.append(dir_path + "/../../lib")
 from sim.camera import SimpleCamera
 # from vo.core_vo import VIO_MonoVO
 from vo.mono_vo import MonoStreamVO
-from utils.transformations import transform_kps_camera2nwu
+from kinematics.transformations import transform_kps_camera2nwu
 from utils.plotting import set_axes_equal, plot_3d_kps, get_new_ax3d
 
 import numpy as np

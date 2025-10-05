@@ -4,7 +4,7 @@ import os
 import sys
 dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(dir_path + "/..")
-from utils.transformations import transform_kps_nwu2camera    # already in your repo
+from kinematics.transformations import transform_kps_nwu2camera    # already in your repo
 from scipy.interpolate import CubicSpline   # SciPy ≥1.4
 from sim.camera import SimpleCamera
 from sim.box import Box

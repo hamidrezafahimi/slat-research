@@ -329,3 +329,21 @@ def project_mode_dedup(ext_pts: np.ndarray,
     spline_pts = project_external_to_surface_idw(ext_dedup, surf_mesh, k=k, eps=eps)
     loss_val, mask, colors = calc_loss(ext_dedup, spline_pts, loss_thresh)
     return spline_pts, colors, float(loss_val)
+
+def interpolate_ctrl_points_to_larger_grid(ctrl_pts: np.ndarray, target_grid_size: int) -> np.ndarray:
+    """Interpolate a smaller grid of control points (e.g., 3x3) to a larger grid (e.g., 10x10)."""
+    # Define the size of the grid
+    x = ctrl_pts[:, 0]
+    y = ctrl_pts[:, 1]
+    z = ctrl_pts[:, 2]
+    
+    # Create a mesh grid for the target size
+    x_new = np.linspace(min(x), max(x), target_grid_size)
+    y_new = np.linspace(min(y), max(y), target_grid_size)
+    x_grid, y_grid = np.meshgrid(x_new, y_new)
+    
+    # Perform the interpolation
+    z_grid = griddata((x, y), z, (x_grid, y_grid), method='cubic')
+
+    # Stack the result into a new control points array
+    return np.column_stack([x_grid.ravel(), y_grid.ravel(), z_grid.ravel()])

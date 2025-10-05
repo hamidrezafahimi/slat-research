@@ -18,27 +18,18 @@ import numpy as np
 import open3d as o3d
 import open3d.visualization.gui as gui
 import open3d.visualization.rendering as rendering
+import os
+import sys
+dir_path = os.path.dirname(os.path.realpath(__file__))
+sys.path.append(dir_path + "/../../../lib")
 
-# ---- Import exactly what you asked to keep external in helper.py ----
-try:
-    from helper import generate_xy_spline, RandomSurfacer, Projection3DScorer
-except ImportError as e:
-    print("ERROR: Could not import from helper.py (need generate_xy_spline, RandomSurfacer, Projection3DScorer).", file=sys.stderr)
-    raise
+from diffusion.helper import RandomSurfacer
+from diffusion.scoring import Projection3DScorer
+from diffusion.config import BGPatternDiffuserConfig
+from utils.o3dviz import visualize_spline_mesh
 
 # =================== helpers: materials viewer (your style) ===================
-def mat_points(size=4.0):
-    m = rendering.MaterialRecord()
-    m.shader = "defaultUnlit"
-    m.point_size = float(size)
-    return m
 
-def mat_mesh():
-    m = rendering.MaterialRecord()
-    m.shader = "defaultLit"
-    m.base_color = (0.7, 0.7, 0.9, 1.0)
-    m.base_roughness = 0.8
-    return m
 
 def mat_mesh_tinted(rgba=(0.7, 0.95, 0.7, 0.5)):
     m = rendering.MaterialRecord()
@@ -47,41 +38,6 @@ def mat_mesh_tinted(rgba=(0.7, 0.95, 0.7, 0.5)):
     m.base_roughness = 0.8
     return m
 
-def _fit_camera(scene, geoms):
-    aabbs = [g.get_axis_aligned_bounding_box() for g in geoms if g is not None]
-    if not aabbs:
-        return
-    mins = np.min([a.min_bound for a in aabbs], axis=0)
-    maxs = np.max([a.max_bound for a in aabbs], axis=0)
-    center = 0.5 * (mins + maxs)
-    extent = float(max(maxs - mins))
-    if extent <= 0:
-        extent = 1.0
-    eye = center + np.array([0, -3.0 * extent, 1.8 * extent])
-    up = np.array([0, 0, 1])
-    scene.camera.look_at(center, eye, up)
-
-def visualize_with_materials(ctrl_pcd, surf_mesh, ext_pcd, proj_pcd=None):
-    gui.Application.instance.initialize()
-    window = gui.Application.instance.create_window("Best Spline (Materials Viewer)", 1024, 768)
-    scene = gui.SceneWidget()
-    scene.scene = rendering.Open3DScene(window.renderer)
-    window.add_child(scene)
-
-    if ctrl_pcd is not None:
-        scene.scene.add_geometry("ctrl_pcd", ctrl_pcd, mat_points(8.0))
-    if surf_mesh is not None:
-        scene.scene.add_geometry("surf_mesh", surf_mesh, mat_mesh())
-    if ext_pcd is not None:
-        scene.scene.add_geometry("ext_pcd", ext_pcd, mat_points(2.0))
-    if proj_pcd is not None:
-        scene.scene.add_geometry("proj_pcd", proj_pcd, mat_points(2.0))
-
-    axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=2.0)
-    scene.scene.add_geometry("axis", axis, mat_mesh())
-
-    _fit_camera(scene.scene, [ctrl_pcd, surf_mesh, ext_pcd, proj_pcd, axis])
-    gui.Application.instance.run()
 
 def visualize_with_materials_sandwich(ctrl_pcd, best_mesh, ext_pcd, top_mesh, mid_mesh, bot_mesh, proj_pcd=None):
     """Same look, but overlays top/mid/bottom."""
@@ -111,7 +67,7 @@ def visualize_with_materials_sandwich(ctrl_pcd, best_mesh, ext_pcd, top_mesh, mi
     axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=2.0)
     scene.scene.add_geometry("axis", axis, mat_mesh())
 
-    _fit_camera(scene.scene, [ctrl_pcd, best_mesh, ext_pcd, proj_pcd, top_mesh, mid_mesh, bot_mesh, axis])
+    fit_camera(scene.scene, [ctrl_pcd, best_mesh, ext_pcd, proj_pcd, top_mesh, mid_mesh, bot_mesh, axis])
     gui.Application.instance.run()
 
 # =================== I/O helpers ===================
@@ -126,15 +82,14 @@ def save_ctrl_csv(path: str, ctrl_pts: np.ndarray):
 def main():
     ap = argparse.ArgumentParser(description="Random spline search around CG-centered XY base surface; score via Projection3DScorer; view with materials.")
     ap.add_argument("--cloud", required=True, help="Path to external point cloud.")
-    ap.add_argument("--N", type=int, default=100, help="Number of random spline candidates.")
-    ap.add_argument("--grid_w", type=int, default=6)
-    ap.add_argument("--grid_h", type=int, default=4)
+    ap.add_argument("--N", type=int, default=10, help="Number of random spline candidates.")
+    ap.add_argument("--grid_w", type=int, default=3)
+    ap.add_argument("--grid_h", type=int, default=3)
     ap.add_argument("--samples_u", type=int, default=40)
     ap.add_argument("--samples_v", type=int, default=40)
     ap.add_argument("--margin", type=float, default=0.02)
     ap.add_argument("--kmin_neighbors", type=int, default=8)
     ap.add_argument("--neighbor_cap", type=int, default=64)
-    ap.add_argument("--max_delta_z", type=float, default=0.5)
     ap.add_argument("--tau", type=float, default=None)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--save-best", default="best_ctrl.csv")
@@ -160,16 +115,21 @@ def main():
 
     base_mesh = rs.base_mesh
     cloud_pts = rs.cloud_pts
+    max_dz = rs.OF
+    print("MAX DZ IS: -----> ", max_dz)
 
-    p3ds = Projection3DScorer(
-        cloud_pts=cloud_pts,
-        spline_mesh=base_mesh,
-        kmin_neighbors=args.kmin_neighbors,
-        neighbor_cap=args.neighbor_cap,
-        max_delta_z=args.max_delta_z,
-        tau=args.tau,
-        original_colors=None,
+    import os
+    # Set environment variable for the Python script
+    os.environ["MY_VAR"] = str(max_dz)
+    cfg = BGPatternDiffuserConfig(
+        hfov_deg = 90.0,
+        output_dir = ""
     )
+
+
+    p3ds = Projection3DScorer(cfg)
+    p3ds.reset(cloud_pts, smoothness_base_mesh=base_mesh, 
+                max_delta_z=max_dz)
 
     base_score, _ = p3ds.score(base_mesh)
     print(f"[info] Base flat-surface score = {base_score:.6f}")
@@ -244,7 +204,8 @@ def main():
         else:
             if best_mesh is not None and not best_mesh.has_vertex_normals():
                 best_mesh.compute_vertex_normals()
-            visualize_with_materials(
+            print(type(ctrl_pcd), type(best_mesh), type(ext_pcd), type(proj_pcd))
+            visualize_spline_mesh(
                 ctrl_pcd=ctrl_pcd,
                 surf_mesh=best_mesh,
                 ext_pcd=ext_pcd,

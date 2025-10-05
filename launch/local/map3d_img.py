@@ -2,7 +2,7 @@ import os
 import sys
 dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(dir_path + "/../../lib")
-from mapper3D import Mapper3D, RefusionMode, Mapper3DConfig
+from mapper3D import Mapper3D, FusionMode, Mapper3DConfig
 from kinematics.pose import Pose
 import cv2
 import numpy as np
@@ -21,7 +21,7 @@ def main():
 
     p = Pose(x=0,y=0,z=1.7,roll=0,pitch=-0.15,yaw=0)
 
-    cfg = Mapper3DConfig(ref_mode=RefusionMode.Unfold,
+    cfg = Mapper3DConfig(ref_mode=FusionMode.Unfold,
                          vis = True,
                          plot = True,
                          color_mode = 'image',   # Options: 'image', 'proximity', 'constant', 'none'

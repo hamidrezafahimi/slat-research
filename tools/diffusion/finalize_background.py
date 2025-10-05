@@ -1,5 +1,4 @@
 import numpy as np
-from scipy.interpolate import griddata
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import cv2

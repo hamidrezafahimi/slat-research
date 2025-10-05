@@ -80,7 +80,7 @@ def main():
     # 2) Build pose & HxWx3 via project3DAndScale
     pose = Pose(x=args.pose_x, y=args.pose_y, z=args.pose_z,
                 roll=args.pose_roll, pitch=args.pose_pitch, yaw=args.pose_yaw)
-    xyz_img = project3DAndScale(metric_depth, pose, args.hfov_deg, metric_depth.shape)
+    xyz_img, _ = project3DAndScale(metric_depth, pose, args.hfov_deg, metric_depth.shape)
 
     # 3) Flatten to pcd (black)
     pts_flat = xyz_img.reshape(-1, 3)

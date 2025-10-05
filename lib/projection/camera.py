@@ -31,7 +31,7 @@ import os
 import sys
 dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(os.path.join(dir_path, ".."))
-from utils.transformations import transform_nwu_to_camera
+from kinematics.transformations import transform_nwu_to_camera
 
 # ====================================================================== #
 #  simple rotation helpers (kept for project_2dTo3d compatibility)

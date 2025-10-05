@@ -39,12 +39,7 @@ def plot_point_cloud(point_cloud, visualization_image=None, save=False, filename
         output_filename = str(filename) + ".pcd"
         o3d.io.write_point_cloud(output_filename, pcd)
     
-def generate_gep_data(pose: Pose):
-    # Compute ground elevation profile - What the true background must be, with 255.0 as max val
-    gep_depth = calc_ground_depth(hfov_deg, pitch_rad=pose._pitch_rad, 
-                                    output_shape=metric_depth.shape)
-    gep_pc_scaled = project3DAndScale(gep_depth, pose, hfov_deg, metric_depth.shape)
-    return gep_pc_scaled, gep_depth
+
 
 
 metric_depth_path, metric_bg_path, color_path = sys.argv[1:4]
@@ -61,17 +56,17 @@ visimg = cv2.imread(color_path)[200:,:]
 # metric_bg_s = metric_bg / np.max(metric_depth) * 255.0
 gep_pc_scaled, gep_depth = generate_gep_data(pose=p)
 
-rd_pc_scaled = project3DAndScale(metric_depth, p, hfov_deg, metric_depth.shape)
+rd_pc_scaled, _ = project3DAndScale(metric_depth, p, hfov_deg, metric_depth.shape)
 
-bg_pc_scaled = project3DAndScale(metric_bg, p, hfov_deg, metric_depth.shape)
+bg_pc_scaled, _ = project3DAndScale(metric_bg, p, hfov_deg, metric_depth.shape)
 
-# if ref_mode == RefusionMode.Replace_25D:
+# if ref_mode == FusionMode.Replace_25D:
 # bg_scaled = np.where(metric_bg_s < metric_depth_s, metric_depth_s, metric_bg_s)
 # fimg = move_depth(metric_depth_s, bg_scaled, gep_depth)
-# refused_pc = project3DAndScale(fimg, p, hfov_deg, metric_depth.shape)
-# elif ref_mode == RefusionMode.Unfold:
+# refused_pc, _ = project3DAndScale(fimg, p, hfov_deg, metric_depth.shape)
+# elif ref_mode == FusionMode.Unfold:
 refused_pc = unfold_depth(rd_pc_scaled, bg_pc_scaled, gep_pc_scaled)
-# elif ref_mode == RefusionMode.Drop:
+# elif ref_mode == FusionMode.Drop:
 # refused_pc = drop_depth(rd_pc_scaled, bg_pc_scaled, gep_pc_scaled)
 
 plot_point_cloud(rd_pc_scaled, visualization_image= visimg, aug_points=bg_pc_scaled, aug_img=np.zeros_like(visimg))

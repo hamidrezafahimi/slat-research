@@ -30,50 +30,6 @@ import open3d as o3d
 
 
 # =================== helpers: geometry ===================
-def mat_points(size=4.0):
-    m = rendering.MaterialRecord()
-    m.shader = "defaultUnlit"
-    m.point_size = float(size)
-    return m
-
-def mat_mesh():
-    m = rendering.MaterialRecord()
-    m.shader = "defaultLit"
-    m.base_color = (0.7, 0.7, 0.9, 1.0)
-    m.base_roughness = 0.8
-    return m
-
-def visualize_with_materials(ctrl_pcd, surf_mesh, ext_pcd, proj_pcd=None):
-    gui.Application.instance.initialize()
-    window = gui.Application.instance.create_window("Smoothness + Surface", 1024, 768)
-    scene = gui.SceneWidget()
-    scene.scene = rendering.Open3DScene(window.renderer)
-    window.add_child(scene)
-
-    scene.scene.add_geometry("ctrl_pcd", ctrl_pcd, mat_points(8.0))
-    scene.scene.add_geometry("surf_mesh", surf_mesh, mat_mesh())
-    scene.scene.add_geometry("ext_pcd", ext_pcd, mat_points(2.0))
-    if proj_pcd is not None:
-        scene.scene.add_geometry("proj_pcd", proj_pcd, mat_points(2.0))
-
-    axis = o3d.geometry.TriangleMesh.create_coordinate_frame(size=2.0)
-    scene.scene.add_geometry("axis", axis, mat_mesh())
-
-    # fit camera
-    if proj_pcd is not None:
-        aabbs = [g.get_axis_aligned_bounding_box() for g in [ctrl_pcd, surf_mesh, ext_pcd, proj_pcd]]
-    else:
-        aabbs = [g.get_axis_aligned_bounding_box() for g in [ctrl_pcd, surf_mesh, ext_pcd]]
-    mins = np.min([a.min_bound for a in aabbs], axis=0)
-    maxs = np.max([a.max_bound for a in aabbs], axis=0)
-    center = 0.5 * (mins + maxs)
-    extent = max(maxs - mins)
-    eye = center + np.array([0, -3.0 * extent, 1.8 * extent])
-    up = np.array([0, 0, 1])
-    scene.scene.camera.look_at(center, eye, up)
-
-    gui.Application.instance.run()
-
 def show_gui_with_materials(geoms: list[o3d.geometry.Geometry]):
     if not _GUI_OK:
         raise RuntimeError("Open3D GUI not available. Install open3d with GUI support.")

@@ -50,7 +50,7 @@ if __name__ == "__main__":
     # metric_depth = np.loadtxt(metric_depth_path, delimiter=',', dtype=np.float32)[200:,:]
     metric_depth = np.loadtxt(metric_depth_path, delimiter=',', dtype=np.float32)
 
-    rd_pc_scaled = project3DAndScale(metric_depth, p, hfov_deg, metric_depth.shape)
+    rd_pc_scaled, _ = project3DAndScale(metric_depth, p, hfov_deg, metric_depth.shape)
 
     # plot_point_cloud_and_save(rd_pc_scaled, visualization_image= cv2.imread(color_path)[200:,:], save=True)
     plot_point_cloud_and_save(rd_pc_scaled, visualization_image= cv2.imread(color_path), save=True)

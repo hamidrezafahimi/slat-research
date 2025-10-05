@@ -9,3 +9,4 @@
 *.json
 *.pcd
 *.ply
+data/

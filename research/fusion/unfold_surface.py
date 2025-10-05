@@ -95,7 +95,7 @@ def main():
     metric_depth = np.loadtxt(args.metric_depth, delimiter=',', dtype=np.float32)
     pose = Pose(x=args.pose_x, y=args.pose_y, z=args.pose_z,
                 roll=args.pose_roll, pitch=args.pose_pitch, yaw=args.pose_yaw)
-    xyz_img = project3DAndScale(metric_depth, pose, args.hfov_deg, metric_depth.shape)
+    xyz_img, _ = project3DAndScale(metric_depth, pose, args.hfov_deg, metric_depth.shape)
 
     # A) full-surface interpolation (light green)
     t0 = time.time()

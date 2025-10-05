@@ -1,13 +1,15 @@
+import numpy as np
+import os, sys
+dir_path = os.path.dirname(os.path.realpath(__file__))
+sys.path.append(dir_path + "/..")
+from kinematics.pose import Pose
 import open3d as o3d
+
 import random
 from types import SimpleNamespace
-import numpy as np
-try:
-    from scipy.interpolate import CubicSpline
-    from scipy.spatial import cKDTree
-    _HAS_SCIPY = True
-except Exception:
-    _HAS_SCIPY = False
+from scipy.interpolate import CubicSpline
+from scipy.spatial import cKDTree
+_HAS_SCIPY = True
 
 def add_grid_and_axes(extent=50, step=1):
     """Return a grey XY-grid and XYZ axes for context."""
@@ -1287,3 +1289,308 @@ def unfold_surface(xyz_img,
     )
     return unfolded_surface, context
 
+def move_depth(depth_image, bg_image, gep_image):
+    assert depth_image.dtype == np.float32 and bg_image.dtype == np.float32 and \
+        gep_image.dtype == np.float32
+    relative_depth_before = depth_image / bg_image
+
+    # Convert depth data into proximity data
+    proximity_image = 255.0 - depth_image
+    bg_prox = 255.0 - bg_image
+    gep_prox = 255.0 - gep_image
+
+    # Extract foreground
+    fg_prox = proximity_image - bg_prox
+    assert np.all(fg_prox >= 0)
+
+    # Rescale foreground objects
+    # 1. No rescaling
+    # r = 1
+    # 2. Rescaling based on relative depth
+    # r = gep_image[min_depth_index] * (1 - relative_depth_before[min_depth_index]) / fg_prox[min_depth_index]
+    # 3. Rescaling based on relative proximity
+    # r = (gep_prox[min_depth_index] * (1 - relative_prox_before[min_depth_index])) / \
+    #       (fg_prox[min_depth_index] * relative_prox_before[min_depth_index])
+    # fg_prox_scaled = fg_prox * r
+    r = np.where(fg_prox != 0, gep_image * (1 - relative_depth_before) / fg_prox, 0.0)
+    fg_prox_scaled = fg_prox * r
+
+    # Replace old background with new background
+    # 1. main functionality
+    moved_prox = fg_prox_scaled + gep_prox
+    # 2. No background
+    # moved_prox = fg_prox_scaled
+    # 3. No rescaling
+    # moved_prox = fg_prox_scaled + bg_prox
+
+    # Check
+    # relative_prox_before = bg_prox / proximity_image
+    # relative_prox_after = gep_prox / moved_prox
+    # relative_depth_before = depth_image / gep_image
+    # relative_depth_after = moved_depth / gep_image
+    # print(relative_depth_before[min_depth_index], relative_depth_after[min_depth_index])
+    # print(relative_prox_before[min_depth_index], relative_prox_after[min_depth_index])
+
+    assert np.max(moved_prox) < 255.0 and np.min(moved_prox) >= 0.0,\
+        f"min: {np.min(moved_prox):.2f}, max: {np.max(moved_prox):.2f}"
+    moved_depth = 255.0 - moved_prox
+    return moved_depth
+
+def calc_ground_depth(hfov_degs,
+                      pitch_rad,
+                      output_shape,
+                      fixed_alt=10.0,
+                      horizon_pitch_rad=-0.034):
+    """
+    Returns a float32 image whose pixel intensities encode
+        C · metric_distance_to_ground    0 ≤ value ≤ 255
+
+    C is chosen so that the farthest *ground* distance visible in
+    the image is mapped to exactly 255.  Rays that never intersect
+    the ground, or whose pitch > horizon_pitch_rad, are forced to 255.
+    """
+    H, W = output_shape
+
+    # --- 1) intrinsics ------------------------------------------------
+    f  = (W / 2) / np.tan(np.radians(hfov_degs) / 2)
+    cx, cy = W / 2.0, H / 2.0
+
+    # --- 2) unit rays in camera coords --------------------------------
+    xg, yg = np.meshgrid(np.arange(W), np.arange(H))
+    X = (xg - cx) / f
+    Y = (yg - cy) / f
+    Z = np.ones_like(X)
+    norm = np.sqrt(X**2 + Y**2 + Z**2)
+    dirs_cam = np.stack([X / norm, Y / norm, Z / norm], axis=-1)
+
+    # --- 3) camera  ->  NED -------------------------------------------
+    Ry90neg = np.array([[ 0, 0, 1],
+                        [ 0, 1, 0],
+                        [-1, 0, 0]])
+    Rx90neg = np.array([[1, 0,  0],
+                        [0, 0, -1],
+                        [0, 1,  0]])
+    dirs_ned = dirs_cam @ (Rx90neg @ Ry90neg).T
+
+    # --- 4) apply camera pitch about +Y in NED ------------------------
+    Ry = np.array([[ np.cos(-pitch_rad), 0, -np.sin(-pitch_rad)],
+                   [ 0,                  1,  0               ],
+                   [ np.sin(-pitch_rad), 0,  np.cos(-pitch_rad)]])
+    dirs = dirs_ned @ Ry.T                     # final unit directions
+
+    # --- 5) ray pitch angle & ground intersection --------------------
+    horiz_len     = np.linalg.norm(dirs[..., :2], axis=-1)
+    pitch_angle   = np.arctan2(-dirs[..., 2], horiz_len)   # +ve up, –ve down
+    dir_z         = dirs[..., 2]                           # downward component
+
+    eps           = 1e-12
+    distance_raw  = np.where(dir_z > eps,                 # t = alt / dir_z
+                             fixed_alt / dir_z,
+                             np.inf).astype(np.float32)
+
+    # --- 6) classify pixels ------------------------------------------
+    sky_mask      = (pitch_angle > horizon_pitch_rad) | ~np.isfinite(distance_raw)
+    ground_mask   = ~sky_mask                            # valid finite hits
+
+    if not np.any(ground_mask):
+        raise RuntimeError("Camera sees no ground below the horizon!")
+
+    d_max         = distance_raw[ground_mask].max()      # farthest ground distance
+    scale         = 255.0 / d_max                        # C  so that d_max→255
+
+    # --- 7) build output image ---------------------------------------
+    depth_img     = np.full((H, W), 255.0, dtype=np.float32)    # start with sky
+    depth_img[ground_mask] = distance_raw[ground_mask] * scale
+    depth_img     = np.minimum(depth_img, 255.0)                # clamp just in case
+    return depth_img
+
+def unfold_depth(dpc, bpc, gpc):
+    dpc_pcd = xyz_image_to_o3d_pcd(dpc)
+    bpc_pcd = xyz_image_to_o3d_pcd(bpc)
+    gpc_pcd = xyz_image_to_o3d_pcd(gpc)
+    
+    bpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+    bpc_pcd = bpc_pcd.voxel_down_sample(0.02)
+    gpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+    gpc_pcd = gpc_pcd.voxel_down_sample(0.02)
+    
+    proj_b = project_points_multi_fast(bpc_pcd, dpc, k=8, just_proj=True)
+    proj_g = project_points_multi_fast(gpc_pcd, proj_b, k=8, just_proj=True)
+    dist = euclidean_distance_map(dpc, proj_b)
+    unfolded_dpc = proj_g.copy()
+    unfolded_dpc[:, :, 2:3] += dist
+    return unfolded_dpc
+
+def calc_dist2bottom(pc_up: np.ndarray, pc_down: np.ndarray) -> np.ndarray:
+    H, W, _ = pc_up.shape
+    up_flat = pc_up.reshape(-1, 3)
+    down_flat = pc_down.reshape(-1, 3)
+
+    xy_down = down_flat[:, :2]
+    z_down = down_flat[:, 2]
+    interp = LinearNDInterpolator(xy_down, z_down, fill_value=np.nan)
+
+    projected_z = np.empty_like(up_flat[:, 2])
+    for i, (x, y, _) in enumerate(up_flat):
+        z_proj = interp(x, y)
+        if np.isnan(z_proj):
+            dists = np.linalg.norm(xy_down - [x, y], axis=1)
+            z_proj = z_down[np.argmin(dists)]
+        projected_z[i] = z_proj
+
+    vertical_distances = up_flat[:, 2] - projected_z
+    return vertical_distances.reshape((H, W))
+
+def drop_depth(dpc, bpc, gpc):
+    alt_diff_db = calc_dist2bottom(dpc, bpc)
+    mean_gpc_z = np.mean(gpc[:,:,2])
+    alt_diff_dg = dpc[:,:,2] - mean_gpc_z
+    diff = -(alt_diff_db - alt_diff_dg)
+    dropped_dpc = dpc.copy()
+    dropped_dpc[:,:,2] -= diff
+    return dropped_dpc
+
+
+def ndfDrop_depth(dpc, bpc, gpc):
+    print("ndfDrop_depth")
+
+    nan_indices = np.argwhere(np.isnan(bpc).any(axis=2))
+    print("Indices of points with NaN -> bpc: ", len(nan_indices))
+    dpc_pcd = xyz_image_to_o3d_pcd(dpc)
+    bpc_pcd = xyz_image_to_o3d_pcd(bpc)
+    gpc_pcd = xyz_image_to_o3d_pcd(gpc)
+
+    if len(bpc_pcd.points) == 0:
+        raise ValueError("bpc_pcd is empty, cannot proceed.")
+    
+    bpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+    bpc_pcd = bpc_pcd.voxel_down_sample(0.02)
+    gpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+    gpc_pcd = gpc_pcd.voxel_down_sample(0.02)
+    
+
+    # # Sample --------------------------------------------------------------
+    # index_h = 6
+    # index_w = 36
+
+    # point_dpc = dpc[index_h:index_h+1, index_w:index_w+1, :]
+
+    # point_b = project_points_multi_fast(bpc_pcd, point_dpc, k=8, just_proj=True)
+    # point_g_ = project_points_multi_fast(gpc_pcd, point_b, k=8, just_proj=True)
+    
+    # proj_g, _ = unfold_surface(bpc, hfov_deg=80.0)
+
+    # print ("index d in bpc", map_pc_proj_to_index(point_dpc, bpc))
+    # print ("index d in gpc", map_pc_proj_to_index(point_dpc, gpc))
+    # print ("index b in bpc", map_pc_proj_to_index(point_b, bpc))
+    # # exit()
+    # index_h = 71
+    # index_w = 38
+    # point_g = proj_g[index_h:index_h+1, index_w:index_w+1, :]
+    # # point_bpc = bpc[index_h:index_h+1, index_w:index_w+1, :]
+
+    # # Flatten to (3,)
+    # pa = point_dpc.reshape(3)
+    # pb = point_b.reshape(3)
+    # pg = point_g_.reshape(3)
+    # pbp = point_g.reshape(3)
+
+    # # Stack into Nx3 array
+    # points = np.vstack([pa, pb, pg, pbp])
+
+    # # Create LineSet
+    # lines = [[0, 1], [1, 2], [1, 3]]  # a->b, b->g
+    # colors = [[1, 0, 0], [0, 1, 0], [0, 1, 1]]  # red for a->b, green for b->g
+
+    # line_set = o3d.geometry.LineSet()
+    # line_set.points = o3d.utility.Vector3dVector(points)
+    # line_set.lines = o3d.utility.Vector2iVector(lines)
+    # line_set.colors = o3d.utility.Vector3dVector(colors)
+
+    # spheres = []
+    # sphere_colors = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 0]]
+    # radii = [0.05, 0.05, 0.05, 0.1]
+
+    # for pt, col, r in zip(points, sphere_colors, radii):
+    #     sphere = o3d.geometry.TriangleMesh.create_sphere(radius=r)
+    #     sphere.translate(pt)
+    #     sphere.paint_uniform_color(col)
+    #     spheres.append(sphere)
+
+    # # Visualize
+    
+    # sss = xyz_image_to_o3d_pcd(proj_g)
+    # o3d.visualization.draw_geometries([line_set, bpc_pcd, dpc_pcd, sss, *spheres])
+
+    # exit()
+    # # --------------------------------------------------------------
+
+
+    proj_b = project_points_multi_fast(bpc_pcd, dpc, k=8, just_proj=True)
+    print("unfold_surface")
+    proj_g, _ = unfold_surface(bpc, hfov_deg=80.0)
+    g_pcd = xyz_image_to_o3d_pcd(proj_g)
+
+    proj_b_idx = map_pc_proj_to_index(proj_b, bpc) # H * W * 2
+    proj_b_idx_i = np.int32(proj_b_idx)
+    dist = euclidean_distance_map(dpc, proj_b)     # H * W * 1
+    print(proj_b_idx_i[10:20, 10:20, :])
+    
+    print("proj_g: ", proj_g.shape)
+    print("dist: ", dist.shape)
+    print("proj_b_idx: ", proj_b_idx.shape)
+
+
+    unfolded_dpc = np.zeros_like(proj_g)
+    for i in range(dpc.shape[0]):
+        for j in range(dpc.shape[1]):
+            unfolded_dpc[i, j, 0] = proj_g[proj_b_idx_i[i,j,0], proj_b_idx_i[i,j,1], 0]
+            unfolded_dpc[i, j, 1] = proj_g[proj_b_idx_i[i,j,0], proj_b_idx_i[i,j,1], 1]
+            unfolded_dpc[i, j, 2] = proj_g[proj_b_idx_i[i,j,0], proj_b_idx_i[i,j,1], 2] + dist[i,j,0]
+    
+
+    nan_indices = np.argwhere(np.isnan(unfolded_dpc).any(axis=2))
+    print("Indices of points with NaN -> unfolded_dpc: ", len(nan_indices))
+
+    pc1 = xyz_image_to_o3d_pcd(unfolded_dpc)
+    unfolded_dpc_1 = unfolded_dpc.copy()
+    proj_g = project_points_multi_fast(gpc_pcd, proj_b, k=8, just_proj=True)
+    unfolded_dpc = proj_g.copy()                          # H * W * 3
+    unfolded_dpc[:, :, 2:3] += dist
+    pc2 = xyz_image_to_o3d_pcd(unfolded_dpc)
+
+    # Paint point clouds
+    pc1.paint_uniform_color([0, 1, 0])  # green
+    pc2.paint_uniform_color([1, 0, 0])  # red
+    dpc_pcd.paint_uniform_color([0, 0, 1])
+    g_pcd.paint_uniform_color([0, 0, 0])
+    # Visualize
+    o3d.visualization.draw_geometries([pc1, pc2, dpc_pcd])
+    o3d.visualization.draw_geometries([bpc_pcd, g_pcd, dpc_pcd])
+    return unfolded_dpc
+
+def rescale_depth(depth_image, bg_image, pitch):
+    gep_f = calc_ground_depth(66.0, pitch_rad=pitch, output_shape=depth_image.shape)
+    # Convert to float32
+    depth_f = depth_image.astype(np.float32)
+    bg_f = bg_image.astype(np.float32)
+    # gep_f = gep_depth.astype(np.float32)
+    # Compute how much closer foreground is, in original image
+    fg_raw_f = depth_f - bg_f
+    np.clip(fg_raw_f, 0, 255, out=fg_raw_f)
+    dist_to_camera_raw = np.abs(255.0 - bg_f)
+    # Avoid divide-by-zero
+    dist_to_camera_raw[dist_to_camera_raw == 0] = 1.0
+    # Ratio of foreground proximity
+    ratio = fg_raw_f / dist_to_camera_raw
+    if np.min(ratio) < 0 or np.max(ratio) > 1:
+        raise ValueError("Non-logical ratio calculation")
+
+    dist_to_camera_new = np.abs(255.0 - gep_f)
+    dist_to_camera_new[dist_to_camera_new == 0] = 1.0
+    # Apply same ratio to refined background to get final proximity
+    fg_new_f = ratio * dist_to_camera_new
+    final_f = gep_f + fg_new_f
+    if np.min(final_f) < 0 or np.max(final_f) > 255.0:
+        raise ValueError("Non-logical ratio calculation")
+    return final_f, gep_f

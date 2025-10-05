@@ -95,7 +95,7 @@ def main():
         "pitch": pose_kwargs.get("pitch", -0.78),
         "yaw":   pose_kwargs.get("yaw", 0.0),
     })
-    xyz_img = project3DAndScale(metric_depth, pose, args.hfov_deg, metric_depth.shape)
+    xyz_img, _ = project3DAndScale(metric_depth, pose, args.hfov_deg, metric_depth.shape)
     unfolded_pts, extras = unfold_image_border_points(
         xyz_img=xyz_img,
         hfov_deg=args.hfov_deg,

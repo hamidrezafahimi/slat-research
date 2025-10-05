@@ -7,7 +7,7 @@ sys.path.append(dir_path + "/../../lib")
 from sim.camera import SimpleCamera
 from sim.box import Box
 from sim.trajectory_generation import get_cam_pose, get_cam_trajectory
-from utils.transformations import transform_kps_nwu2camera   # your helper  :contentReference[oaicite:0]{index=0}
+from kinematics.transformations import transform_kps_nwu2camera   # your helper  :contentReference[oaicite:0]{index=0}
 from utils.plotting import visualize_trajectory_and_points
 import cv2
 import json

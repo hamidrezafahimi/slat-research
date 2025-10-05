@@ -5,7 +5,7 @@ import sys
 dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(dir_path + "/../../lib")
 from sim.camera import SimpleCamera
-from utils.transformations import transform_kps_nwu2camera
+from kinematics.transformations import transform_kps_nwu2camera
 from utils.plotting import set_axes_equal
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
