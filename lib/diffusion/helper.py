@@ -268,7 +268,7 @@ def create_grid_on_surface(mesh, samples_u, samples_v):
     grid_pcd.points = o3d.utility.Vector3dVector(grid_points_3d)
     return np.asarray(grid_pcd.points), grid_pcd
 
-def downsample_pcd(pcd: o3d.geometry.PointCloud, ratio: float = 0.5) -> o3d.geometry.PointCloud:
+def downsample_pcd(pcd: o3d.geometry.PointCloud, num_dst: int) -> o3d.geometry.PointCloud:
     """
     Automatically downsample the point cloud to a given ratio or half its size.
     
@@ -282,6 +282,12 @@ def downsample_pcd(pcd: o3d.geometry.PointCloud, ratio: float = 0.5) -> o3d.geom
     """
     # Convert point cloud to numpy array
     cloud_pts = np.asarray(pcd.points, dtype=float)
+    num_orig = float(cloud_pts.shape[0])
+    num_dst = float(num_dst)
+    if num_dst < num_orig:
+        ratio = num_dst / num_orig
+    else:
+        ratio = 1.0
 
     # Calculate the number of points after downsampling
     num_points = cloud_pts.shape[0]

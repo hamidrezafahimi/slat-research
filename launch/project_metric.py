@@ -1,7 +1,7 @@
 import os
 import sys
 dir_path = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(dir_path + "/../../lib")
+sys.path.append(dir_path + "/../lib")
 from projection.mapper3D import Mapper3D, Mapper3DConfig
 from utils.io import IOHandler
 from fusion.BGPatternFuser import BGPatternFuser
@@ -9,19 +9,17 @@ from fusion.config import BGPatternFuserConfig
 
 def main():
     global mapper
-
     io = IOHandler(True)
 
-    fcfg = BGPatternFuserConfig(
-        hfov_deg=90.0
-    )
-    f = BGPatternFuser(config=fcfg)
-    
     # Config
     cfg = Mapper3DConfig(color_mode='image',   # Options: 'image', 'proximity', 'constant', 'none'
                          hfov_deg=io.yaml_data["hfov_deg"])
 
     if io.getDoFuse():
+        fcfg = BGPatternFuserConfig(
+            hfov_deg=90.0
+        )
+        f = BGPatternFuser(config=fcfg)
         mapper = Mapper3D(cfg, fuser=f)
     else:
         mapper = Mapper3D(cfg)

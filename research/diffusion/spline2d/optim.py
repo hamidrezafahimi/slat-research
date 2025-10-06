@@ -14,7 +14,7 @@ from diffusion.scoring import Projection3DScorer
 from diffusion.viz import ClassicViewer
 from diffusion.config import BGPatternDiffuserConfig
 from diffusion.helper import downsample_pcd
-from geom.surfaces import cg_centeric_xy_spline
+from geom.surfaces import cg_centeric_xy_spline, infer_grid, generate_spline
 
 # ---------------- small utilities ----------------
 def factor_pairs(n):
@@ -58,7 +58,7 @@ def main():
     ap.add_argument("--kmin_neighbors", type=int, default=8)
     ap.add_argument("--max_dz", type=float, default=0.5)
     ap.add_argument("--tau", type=float, default=None)
-    ap.add_argument("--alpha", type=float, default=1.0)
+    ap.add_argument("--alpha", type=float, default=0.15)
     ap.add_argument("--out", type=str, required=True)
     ap.add_argument("--eps", type=float, default=1e-3, help="Epsilon for central diff grad wrt z.")
     ap.add_argument("--iters", type=int, default=100, help="Headless: run N full iterations without viewer.")
@@ -100,17 +100,7 @@ def main():
 
     cfg = BGPatternDiffuserConfig(
         hfov_deg=90.0,
-        iters = args.iters,
-        grid_w = args.grid_w,
-        grid_h = args.grid_h,
-        tunning_alpha = args.alpha,
-        spline_mesh_samples_u = args.samples_u,
-        spline_mesh_samples_v = args.samples_v,
-        scoring_smoothness_k = args.k,
-        scoring_smoothness_kmin_neighbors = args.kmin_neighbors,
-        tunning_eps = args.eps,
-        tunning_moveAll = args.move_all,
-        verbosity=args.verbosity,
+        output_dir="",
         fast=args.fast
     )
 
@@ -120,9 +110,10 @@ def main():
         print(f"[auto] Base mesh generated from {args.base_ctrl}")
     else:
         # create centered-XY base mesh for scorer (never reset later)
-        base_mesh, base_ctrl_grid, W, H, center_xy, z0 = cg_centeric_xy_spline(
+        base_mesh, base_ctrl_grid, _, _, center_xy, z0 = cg_centeric_xy_spline(
             cloud_pts, args.grid_w, args.grid_h, args.samples_u, args.samples_v, margin=0.02
         )
+        W, H = infer_grid(base_ctrl_grid)
         print(f"[auto] Base mesh automatically generated parallel to xy plane")
 
 
@@ -131,7 +122,8 @@ def main():
     scorer.reset(cloud_pts, smoothness_base_mesh=base_mesh, max_dz=args.max_dz)
     if args.fast:
         optimizer = Optimizer(cfg)
-        iters_done, final_score, final_z = optimizer.tune(ctrl_pts.copy(), scorer)
+        iters_done, final_score, final_z = optimizer.tune(ctrl_pts.copy(), scorer, iters=args.iters,
+                                                          alpha=args.alpha)
         if args.verbosity != "none":
             mode = "uniform shift (--move_all)" if args.move_all else "per-point"
             print(f"[fast] mode={mode} done iters={iters_done} score={final_score:.6f}")
@@ -143,7 +135,7 @@ def main():
     else:
         # GUI path: keys SPACE/A/O do per-point; M does uniform shift; unaffected by --move_all
         print_manual(args, len(ctrl_pts))
-        ClassicViewer(cfg, cloud_pts, ctrl_pts, scorer, W, H)
+        ClassicViewer(cfg, cloud_pts, ctrl_pts, scorer, W, H, _alpha=args.alpha, iters=args.iters)
 
 
 if __name__ == "__main__":

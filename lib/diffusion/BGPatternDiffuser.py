@@ -35,8 +35,8 @@ class BGPatternDiffuser:
         
         rd_pcm, _ = project3DAndScale(metric_depth, p, self.config.hfov_deg)
         rd_pcd = pcm2pcd(rd_pcm, color_image)
-        if self.config.downsample_ratio != 1.0:
-            rd_pcd = downsample_pcd(rd_pcd, self.config.downsample_ratio)
+        if self.config.downsample_dstNum != 1.0:
+            rd_pcd = downsample_pcd(rd_pcd, self.config.downsample_dstNum)
 
         rd_pcd_arr = pcd2pcdArr(rd_pcd)
 
@@ -50,22 +50,33 @@ class BGPatternDiffuser:
             ctrl_pcd.paint_uniform_color([1.0, 0.2, 0.2])
             visualize_spline_mesh(ctrl_pcd, base_mesh, rd_pcd, name="pre coarse tune model")
 
-        # -------------- Coarse-Tune the Back-Ground Model
-        print(f"[BGPatternDiffuser] Start coarse tunning on index {idx}")
+        print(f"[BGPatternDiffuser] ------- Start coarse tunning-1 on index {idx}")
         rs = RandomSurfacer(cloud=rd_pcd_arr, grid_w=self.config.coarsetune_grid_w, 
                             grid_h=self.config.coarsetune_grid_h, 
                             samples_u=self.config.spline_mesh_samples_u,
                             samples_v=self.config.spline_mesh_samples_v,
                             margin=self.config.spline_mesh_marginal_ratio)
         max_dz = rs.OF
-        self.scorer.reset(rd_pcd_arr, smoothness_base_mesh=base_mesh, max_dz=max_dz)
-        _, _, coarse_tunned_z = self.tunner.tune(ctrl_pts.copy(), self.scorer, 
+        self.scorer.reset(rd_pcd_arr, smoothness_base_mesh=base_mesh, max_dz=max_dz, fine_tune=True)
+        _, _, coarse_tunned_z1 = self.tunner.tune(ctrl_pts.copy(), self.scorer, 
+                                                 iters=self.config.ct1iters,
+                                                 alpha=self.config.coarsetunning_alpha)
+        ct1 = ctrl_pts.copy()
+        ct1[:,2] = coarse_tunned_z1
+        mbase = bspline_surface_mesh_from_ctrl(ct1, self.config.coarsetune_grid_w, self.config.coarsetune_grid_h,
+                                       self.config.spline_mesh_samples_u, self.config.spline_mesh_samples_v)
+
+        print(f"[BGPatternDiffuser] ------- Coarse tunning-1 done on index {idx} - Start coarse tunning-2")
+        # -------------- Coarse-Tune the Back-Ground Model
+        max_dz /= 2
+        self.scorer.reset(rd_pcd_arr, smoothness_base_mesh=mbase, max_dz=max_dz)
+        _, _, coarse_tunned_z = self.tunner.tune(ct1, self.scorer, 
                                                  iters=self.config.coarsetune_iters,
                                                  alpha=self.config.coarsetunning_alpha)
         coarse_tunned = ctrl_pts.copy()
         coarse_tunned[:,2] = coarse_tunned_z
 
-        print(f"[BGPatternDiffuser] Coarse tunning done on index {idx}")
+        print(f"[BGPatternDiffuser] ------- Coarse tunning-2 done on index {idx}")
         # ------------- Prepare for Fine-Tunning
         _, nonshifted_mesh, _, shifted_mesh = compute_shifted_ctrl_points(rd_pcd_arr, coarse_tunned, 
                                                     self.config.spline_mesh_samples_u,

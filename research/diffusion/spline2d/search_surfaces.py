@@ -129,7 +129,7 @@ def main():
 
     p3ds = Projection3DScorer(cfg)
     p3ds.reset(cloud_pts, smoothness_base_mesh=base_mesh, 
-                max_delta_z=max_dz)
+                max_dz=max_dz, fine_tune=True)
 
     base_score, _ = p3ds.score(base_mesh)
     print(f"[info] Base flat-surface score = {base_score:.6f}")
@@ -210,6 +210,7 @@ def main():
                 surf_mesh=best_mesh,
                 ext_pcd=ext_pcd,
                 proj_pcd=proj_pcd,
+                name="sd"
             )
 
 if __name__ == "__main__":

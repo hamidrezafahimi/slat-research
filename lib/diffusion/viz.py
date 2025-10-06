@@ -7,8 +7,8 @@ from geom.surfaces import bspline_surface_mesh_from_ctrl
 import open3d as o3d
 import numpy as np
 
-def apply_update_and_score(ctrl, scorer, cfg):
-    mesh = bspline_surface_mesh_from_ctrl(ctrl, cfg.grid_w, cfg.grid_h, cfg.spline_mesh_samples_u, 
+def apply_update_and_score(ctrl, scorer, W, H, cfg):
+    mesh = bspline_surface_mesh_from_ctrl(ctrl, W, H, cfg.spline_mesh_samples_u, 
                                           cfg.spline_mesh_samples_v)
     score, pj = scorer.score(mesh)
     return score, mesh, pj
@@ -29,18 +29,19 @@ def log_z_values(cfg, prefix, zvals):
 
 
 class ClassicViewer:
-    def __init__(self, config, cloud_pts, ctrl_init, scorer, W, H):
+    def __init__(self, config, cloud_pts, ctrl_init, scorer, W, H, _alpha, iters):
         self.config = config
         self.cloud_pts = cloud_pts
         self.ctrl = ctrl_init.copy()      # the optimizer will operate on this
         self.ctrl0 = ctrl_init.copy()
         self.N = self.ctrl.shape[0]
-        self.W, self.H = W, H
-
+        self.W = W
+        self.H = H
         self.idx = 0
+        self.iters = iters
 
         # optimization backend
-        self.optimizer = Optimizer(_ctrl=self.ctrl, _scorer=scorer, config=config)
+        self.optimizer = Optimizer(_ctrl=self.ctrl, _scorer=scorer, config=config, _alpha=_alpha)
 
         # continuous-mode
         self.running = False
@@ -48,7 +49,7 @@ class ClassicViewer:
         self._in_full_iter = False
 
         # initial candidate mesh/score
-        score0, mesh0, pj0 = apply_update_and_score(self.ctrl, scorer, self.config)
+        score0, mesh0, pj0 = apply_update_and_score(self.ctrl, scorer, self.W, self.H, self.config)
         self.score = score0
         self.mesh = mesh0
         self.pj = pj0
@@ -125,7 +126,8 @@ class ClassicViewer:
                 print(f"[step] score = {score:.6f}")
             else:
                 print(f"      score = {score:.6f}")
-        self.score, self.mesh, self.pj = apply_update_and_score(self.ctrl, self.scorer, self.config)
+        self.score, self.mesh, self.pj = apply_update_and_score(self.ctrl, self.scorer, self.W, 
+                                                                self.H, self.config)
         self._refresh_visuals()
         self.idx = (i + 1) % self.N
         self._update_sel_marker()
@@ -143,7 +145,8 @@ class ClassicViewer:
             score, zvals = self.optimizer.iterate_once()
             log_iter_summary(self.config, "A", 1, score)
             log_z_values(self.config, "[A]", zvals)
-            self.score, self.mesh, self.pj = apply_update_and_score(self.ctrl, self.scorer, self.config)
+            self.score, self.mesh, self.pj = apply_update_and_score(self.ctrl, self.scorer, self.W, 
+                                                                    self.H, self.config)
             self._refresh_visuals()
         finally:
             self._in_full_iter = False
@@ -156,7 +159,8 @@ class ClassicViewer:
         score, zvals = self.optimizer.iterate_once_move_all()
         log_iter_summary(self.config, "M", 1, score)
         log_z_values(self.config, "[M]", zvals)
-        self.score, self.mesh, self.pj = apply_update_and_score(self.ctrl, self.scorer, self.config)
+        self.score, self.mesh, self.pj = apply_update_and_score(self.ctrl, self.scorer, self.W, 
+                                                                self.H, self.config)
         self._refresh_visuals()
         return False
 
@@ -186,7 +190,7 @@ class ClassicViewer:
             print("[R] Reset control net to initial values.")
         self.ctrl[:] = self.ctrl0
         self.optimizer.ctrl = self.ctrl  # keep optimizer view consistent
-        self.score, self.mesh, self.pj = apply_update_and_score(self.ctrl, self.scorer, self.config)
+        self.score, self.mesh, self.pj = apply_update_and_score(self.ctrl, self.scorer, self.W, self.H, self.config)
         self._refresh_visuals()
         return False
 
@@ -200,17 +204,17 @@ class ClassicViewer:
         if not self.running:
             return True
 
-        if self.iter_count >= self.config.iters:
+        if self.iter_count >= self.iters:
             self.running = False
             if self.config.verbosity != "none":
-                print(f"[O] Reached max_iters ({self.config.iters}) iterations. Stopping.")
+                print(f"[O] Reached max_iters ({self.iters}) iterations. Stopping.")
             return True
 
         score, zvals = self.optimizer.iterate_once()  # per-point sweep
         self.iter_count += 1
         log_iter_summary(self.config, "O", self.iter_count, score)
         log_z_values(self.config, f"[O iter={self.iter_count}]", zvals)
-        self.score, self.mesh, self.pj = apply_update_and_score(self.ctrl, self.scorer, self.config)
+        self.score, self.mesh, self.pj = apply_update_and_score(self.ctrl, self.scorer, self.W, self.H, self.config)
         self._refresh_visuals()
         return True
 

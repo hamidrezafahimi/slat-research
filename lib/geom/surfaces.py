@@ -88,8 +88,9 @@ def generate_spline(ctrl_points: np.ndarray,
     ctrl_grid = ctrl_sorted.reshape(gh, gw, 3)
 
     # build mesh with your sampler
-    mesh = bspline_surface_mesh_from_ctrl(ctrl_pts_flat=ctrl_grid, grid_w=gw, grid_h=gh, su=samples_u, sv=samples_v)
-    return mesh, W, H
+    mesh = bspline_surface_mesh_from_ctrl(ctrl_pts_flat=ctrl_grid, grid_w=gw, grid_h=gh, 
+                                          su=samples_u, sv=samples_v)
+    return mesh, gw, gh
 
 def cg_centeric_xy_spline(cloud_pts: np.ndarray,
                        grid_w: int = 6, grid_h: int = 4,

@@ -122,6 +122,9 @@ class Optimizer:
             self.lr = self.scorer.maxDZ * _alpha
             print("LR is : ----> ", self.lr)
             self._score_window = collections.deque(maxlen=self.config.tunning_window)
+            self._big_window_len = 10 * self.config.tunning_window
+            self._score_window_big = collections.deque(maxlen=self._big_window_len)
+            self.avgChangeTolBig = self.config.tunning_avgChangeTol * 60
 
     # ---- Headless run loop (FAST). --move_all toggles behavior here ONLY. ----
     def tune(self, initial_guess, scorer, iters, alpha):
@@ -132,6 +135,9 @@ class Optimizer:
         self.N = initial_guess.shape[0]
         self.W, self.H = infer_grid(self.ctrl)
         self._score_window = collections.deque(maxlen=self.config.tunning_window)
+        self._big_window_len = 10 * self.config.tunning_window
+        self._score_window_big = collections.deque(maxlen=self._big_window_len)
+        self.avgChangeTolBig = self.config.tunning_avgChangeTol * 60
 
         """
         Headless loop. If self.config.tunning_moveAll is True, do uniform shift each iter.
@@ -163,18 +169,19 @@ class Optimizer:
 
             # update history window
             self._score_window.append(float(score))
+            self._score_window_big.append(float(score))
 
             # new: sliding-window stopping checks
-            cut, var = self._should_stop()
+            cut, var, var_big = self._should_stop()
             if cut:
-                if self.config.verbosity:
-                    print(f"Stopping at iter {it} due to sliding-window criterion. "
-                          f"window_scores={list(self._score_window)}")
                 break
 
             if self.config.verbosity == "tiny":
                 if var is not None:
-                    print(f"run internal optimization loop iteration {it} - score: {score:.2f} - var: {var:.5f}")
+                    if var_big is None:
+                        print(f"run internal optimization loop iteration {it} - score: {score:.2f} - var: {var:.5f}")
+                    else:
+                        print(f"run internal optimization loop iteration {it} - score: {score:.2f} - var: {var:.5f} - var_big: {var_big:.4f}")
                 else:
                     print(f"run internal optimization loop iteration {it} - score: {score:.2f}")
 
@@ -195,34 +202,48 @@ class Optimizer:
         - Criteria combined with OR: if either triggers, stop.
         """
         if len(self._score_window) < self.config.tunning_window:
-            return False, None
+            return False, None, None
 
         scores = np.array(self._score_window, dtype=float)
         mean_score = float(np.mean(scores))
 
+        scores_big = np.array(self._score_window_big, dtype=float)
+        mean_score_big = float(np.mean(scores_big))
+
+
+        ret = False
         if mean_score == 0.0:  # avoid division by zero
-            return False, None
+            return ret, None, None
 
         diffs = np.abs(np.diff(scores))
         avg_rel_change = (np.mean(diffs) / mean_score) if diffs.size > 0 else 0.0
-        rel_var = np.var(scores) / mean_score
+        # rel_var = np.var(scores) / mean_score
 
-        # print("avg rel ch: ", avg_rel_change)
+        diffs_big = np.abs(np.diff(scores_big))
+        avg_rel_change_big = (np.mean(diffs_big) / mean_score_big) if diffs_big.size > 0 else 0.0
 
         if self.config.verbosity == "full":
-            print(f"_should_stop check: avg_rel_change={avg_rel_change}, rel_var={rel_var}, "
+            print(f"_should_stop check: avg_rel_change={avg_rel_change} "
                 f"avg_tol={self.config.tunning_avgChangeTol}, var_thresh={self.config.tunning_varThresh}")
 
         if avg_rel_change < self.config.tunning_avgChangeTol:
             if self.config.verbosity:
-                print(f"Stopping because avg_rel_change {avg_rel_change} < {self.config.tunning_avgChangeTol}")
-            return True, avg_rel_change
+                print(f"Stopping because of 'avg_rel_change': {avg_rel_change} < {self.config.tunning_avgChangeTol}")
+            ret = True
+
+        if len(self._score_window_big) >= self._big_window_len:
+            if avg_rel_change_big < self.avgChangeTolBig:
+                if self.config.verbosity:
+                    print(f"Stopping because of 'avg_rel_change_big': {avg_rel_change_big} < {self.avgChangeTolBig}")
+                ret = True
+        else:
+            avg_rel_change_big = None
 
         # if rel_var > self.config.tunning_varThresh:
         #     if self.config.verbosity:
         #         print(f"Stopping because rel_var {rel_var} > {self.config.tunning_varThresh}")
         #     return True
-        return False, avg_rel_change
+        return ret, avg_rel_change, avg_rel_change_big
 
     def central_diff_partial_grad(self, i):
         """Compute central-difference gradient of score wrt ctrl[i,2]."""

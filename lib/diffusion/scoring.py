@@ -222,17 +222,18 @@ class Projection3DScorer:
         self.smoothness_base_mesh = smoothness_base_mesh
         print("[Projection3DScorer] Calculating smoothness score ...")
         self.fineTune = fine_tune
-        if self.fineTune:
-            _scores, _, _, _, _ = associate_compound_score(
-                    ext_pts=self.cloud_pts,
-                    mesh=smoothness_base_mesh,
-                    K_for_radius=self.config.scoring_smoothness_k)
-        else: 
-            _scores = self.self_associate_smoothness()
-
-        downsampled_pts, self.smoothness_scores, _ = score_based_downsample(self.cloud_pts, 
+        _scores, _, _, _, _ = associate_compound_score(
+                ext_pts=self.cloud_pts,
+                mesh=smoothness_base_mesh,
+                K_for_radius=self.config.scoring_smoothness_k)
+        downsampled_pts, s, _ = score_based_downsample(self.cloud_pts, 
                                                                             _scores,
                                                                             target_fraction=self.config.scorebased_downsample_target)
+        if self.fineTune:
+            self.smoothness_scores = s
+        else: 
+            self.smoothness_scores = self.self_associate_smoothness(downsampled_pts)
+
         il = self.cloud_pts.shape[0]                                                                                
         self.cloud_pts = np.asarray(downsampled_pts, dtype=float)
         print(f"[Projection3DScorer] Point clound downsampled from {il} to {downsampled_pts.shape[0]}")
@@ -272,7 +273,7 @@ class Projection3DScorer:
             self.smoothness_scores = self.self_associate_smoothness()
 
     # ----- encapsulated smoothness (project neighbors along spline normals) -----
-    def self_associate_smoothness(self) -> np.ndarray:
+    def self_associate_smoothness(self, pts) -> np.ndarray:
         """
         For each point P in the cloud:
         1) Take k_min nearest neighbors (including P).
@@ -287,7 +288,6 @@ class Projection3DScorer:
 
         Returns per-point smoothness scores in [0, 1].
         """
-        pts = self.cloud_pts
         n = pts.shape[0]
         scores = np.zeros(n, dtype=float)
         rng = np.random.default_rng(2)

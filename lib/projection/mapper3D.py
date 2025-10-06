@@ -126,7 +126,7 @@ class Mapper3D:
             pass
         else:
             raise ValueError(f"Unknown color_mode: {self.config.color_mode}")
-        pcd.colors = o3d.utility.Vector3dVector(colors)
+        pcd.colors = o3d.utility.Vector3dVector(colors[:, [2,1,0]])
         return pcd
 
 
