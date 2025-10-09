@@ -10,7 +10,7 @@ class BGPatternFuser:
         self.config = config
         self.shape = None
 
-    def fuse_flat_ground(self, pose, rd_pc_scaled, bg_mesh):
+    def fuse_flat_ground(self, pose, rd_pc_scaled, bg_pc_scaled):
         if self.shape is None:
             self.shape = rd_pc_scaled.shape[:2]
         else:
@@ -21,7 +21,7 @@ class BGPatternFuser:
         gep_pc_scaled, _ = project3DAndScale(gep_depth, pose, self.config.hfov_deg, self.shape)
 
         rdpcarr = pcm2pcdArr(rd_pc_scaled)
-        bg_pc_scaled = project_external_along_normals_noreject(rdpcarr, bg_mesh)
+        # bg_pc_scaled = project_external_along_normals_noreject(rdpcarr, bg_mesh)
 
         if self.config.flat_mode == FlatFusionMode.Replace_25D:
             assert False, "Currently no support on this legacy task"

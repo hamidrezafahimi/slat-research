@@ -1,4 +1,7 @@
 import numpy as np, open3d as o3d
+from typing import Optional, Union
+
+ArrayLike = Union[np.ndarray, list, tuple]
 
 
 def pcd2pcdArr(pcd):
@@ -17,3 +20,56 @@ def pcm2pcd(pcm, visualization_image):
     pcd.colors = o3d.utility.Vector3dVector(colors[:, [2,1,0]])
     return pcd
 
+def pcdArr2pcd(points_xyz: ArrayLike, colors: Optional[ArrayLike] = None) -> o3d.geometry.PointCloud:
+    """
+    Build an Open3D PointCloud from arrays.
+
+    Parameters
+    ----------
+    points_xyz : (N,3) array-like of float
+        Point positions.
+    colors : None | (3,) | (N,3) array-like of float [0..1] or uint8 [0..255]
+        If (3,), a single RGB color is broadcast to all points.
+
+    Returns
+    -------
+    o3d.geometry.PointCloud
+    """
+    # points
+    P = np.asarray(points_xyz, dtype=float)
+    if P.ndim != 2 or P.shape[1] != 3:
+        raise ValueError(f"`points_xyz` must be shape (N,3); got {P.shape}")
+    if not np.isfinite(P).all():
+        raise ValueError("`points_xyz` contains NaN/Inf.")
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(P)
+
+    # colors (optional)
+    if colors is not None:
+        C = np.asarray(colors)
+        if C.ndim == 1 and C.shape[0] == 3:
+            # single color -> broadcast
+            C = np.broadcast_to(C.reshape(1, 3), (P.shape[0], 3))
+        elif C.ndim == 2 and C.shape == (P.shape[0], 3):
+            pass
+        else:
+            raise ValueError(
+                f"`colors` must be (3,) or (N,3) to match points; got {C.shape}"
+            )
+
+        # convert to float [0,1]
+        if np.issubdtype(C.dtype, np.integer) or C.max() > 1.0:
+            C = C.astype(float) / 255.0
+        else:
+            C = C.astype(float)
+
+        # clamp just in case
+        C = np.clip(C, 0.0, 1.0)
+
+        if not np.isfinite(C).all():
+            raise ValueError("`colors` contains NaN/Inf.")
+
+        pcd.colors = o3d.utility.Vector3dVector(C)
+
+    return pcd

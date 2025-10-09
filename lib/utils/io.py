@@ -7,6 +7,10 @@ import pandas as pd
 from kinematics.pose import Pose
 import cv2
 import numpy as np
+import json
+from typing import Union
+from geom.types import Background
+
 
 def _find_config(dataset_dir: Path) -> Path:
     """Return the path to the first existing YAML config file in dataset_dir."""
@@ -70,8 +74,9 @@ class IOHandler:
         color_img = cv2.imread(color_path)
 
         if self.bgDir is not None:
-            d = os.path.join(self.bgDir, f"bg_{row['index']}.csv")
-            bg = np.loadtxt(d, delimiter=',', dtype=np.float32)
+            d = os.path.join(self.bgDir, f"bg_{row['index']}.pcd")
+            # bg = load_background(d)
+            bg = load_pcd(d)
         else:
             bg = None
         return p, metric_depth, color_img, bg
@@ -97,3 +102,139 @@ class IOHandler:
             for _, row in self.df.iterrows():
                 p, metric_depth, color_img, bg = self.load_row(row) 
                 yield p, metric_depth, color_img, row['index'], bg
+
+ArrayLike = Union[np.ndarray, list, tuple]
+
+def save_grid_with_Tinv(
+    json_path: str,
+    points_xyz: ArrayLike,   # (N,3)
+    grid_w: int,
+    grid_h: int,
+    T: ArrayLike,            # (4,4) forward homogeneous transform
+    float_precision: int = 6
+) -> None:
+    """
+    Save grid points + metadata + T_inv into a JSON file.
+
+    Parameters
+    ----------
+    json_path : str
+        Where to write the JSON file.
+    points_xyz : (N,3) array-like
+        Grid points (rows = [x,y,z]).
+    grid_w, grid_h : float
+        Grid width and height.
+    T : (4,4) array-like
+        Forward homogeneous transform (Original -> Oriented).
+    float_precision : int
+        Decimal places to round when saving.
+    """
+    pts = np.asarray(points_xyz, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError(f"points_xyz must be (N,3), got {pts.shape}")
+
+    T = np.asarray(T, dtype=float)
+    if T.shape != (4, 4):
+        raise ValueError(f"T must be (4,4), got {T.shape}")
+
+    # Compute inverse analytically
+    R = T[:3, :3]
+    t = T[:3, 3]
+    T_inv = np.eye(4)
+    T_inv[:3, :3] = R.T
+    T_inv[:3, 3] = -R.T @ t
+
+    # Round for nicer JSON
+    pts_out = np.round(pts, float_precision).tolist()
+    T_inv_out = np.round(T_inv, float_precision).tolist()
+
+    payload = {
+        "grid": {
+            "width": int(grid_w),
+            "height": int(grid_h),
+            "units": "meters"
+        },
+        "points_xyz": pts_out,
+        "T_inv": T_inv_out,
+        "metadata": {
+            "matrix_format": "row-major",
+            "convention": "x_restored = T_inv * x_oriented",
+            "description": "Grid points with inverse transform."
+        }
+    }
+
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+def load_background(json_path: str) -> Background:
+    """
+    Load a Background instance from a JSON file.
+
+    Parameters
+    ----------
+    json_path : str
+        Path to the JSON file.
+
+    Returns
+    -------
+    Background
+        Instance containing grid points, dimensions, T_inv, metadata.
+    """
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    points_xyz = np.array(data["points_xyz"], dtype=float)
+    grid_w = int(data["grid"]["width"])
+    grid_h = int(data["grid"]["height"])
+    T_inv = np.array(data["T_inv"], dtype=float)
+    metadata = data.get("metadata", {})
+
+    return Background(
+        points_xyz=points_xyz,
+        grid_w=grid_w,
+        grid_h=grid_h,
+        T_inv=T_inv,
+        metadata=metadata
+    )
+
+import open3d as o3d
+
+def save_pcd(points: np.ndarray, colors: np.ndarray, filepath: str):
+    """
+    Save a point cloud to a .pcd file.
+
+    Args:
+        points (np.ndarray): Nx3 array of 3D point coordinates.
+        colors (np.ndarray): Nx3 array of RGB colors (values in [0,1]).
+        filepath (str): Path to save the .pcd file.
+    """
+    if points.shape[1] != 3:
+        raise ValueError("Points array must be of shape (N, 3)")
+    if colors.shape[1] != 3:
+        raise ValueError("Colors array must be of shape (N, 3)")
+    if points.shape[0] != colors.shape[0]:
+        raise ValueError("Points and colors must have the same number of rows")
+
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points.astype(float))
+    pcd.colors = o3d.utility.Vector3dVector(colors.astype(float))
+
+    # Write to file
+    success = o3d.io.write_point_cloud(filepath, pcd)
+    if not success:
+        raise IOError(f"Failed to write point cloud to {filepath}")
+
+def load_pcd(filepath: str) -> o3d.geometry.PointCloud:
+    """
+    Load a point cloud from a .pcd file.
+
+    Args:
+        filepath (str): Path to the .pcd file.
+
+    Returns:
+        o3d.geometry.PointCloud: Loaded point cloud.
+    """
+    pcd = o3d.io.read_point_cloud(filepath)
+    if pcd.is_empty():
+        raise IOError(f"Failed to load point cloud or file is empty: {filepath}")
+    return pcd

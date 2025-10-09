@@ -381,3 +381,33 @@ def score_based_downsample(ext_pts: np.ndarray,
     ds_pts = ext_pts[mask]
     ds_scores = scores01[mask]
     return ds_pts, ds_scores, mask
+
+def uniform_downsample(ext_pts: np.ndarray, target_fraction: float):
+    """
+    Uniformly downsample the given points to the specified fraction.
+
+    Parameters:
+        ext_pts: (N,3) or (N,...) array of points.
+        target_fraction: fraction of points to keep (0 < target_fraction <= 1)
+
+    Returns:
+        ds_pts: np.ndarray of kept points
+        mask: boolean mask into original array (len == len(ext_pts))
+    """
+    N = len(ext_pts)
+    if N == 0:
+        return ext_pts[:0], np.zeros(0, dtype=bool)
+
+    if not (0.0 < target_fraction <= 1.0):
+        raise ValueError("target_fraction must be in (0, 1].")
+
+    desired_k = max(1, int(np.ceil(N * target_fraction)))
+    rng = np.random.default_rng(None)
+
+    # Randomly choose desired_k unique indices
+    idx = rng.choice(N, size=desired_k, replace=False)
+    mask = np.zeros(N, dtype=bool)
+    mask[idx] = True
+
+    ds_pts = ext_pts[mask]
+    return ds_pts, mask

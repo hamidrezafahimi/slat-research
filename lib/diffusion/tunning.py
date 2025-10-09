@@ -94,6 +94,8 @@ def interpolate_ctrl_points_to_larger_grid(ctrl_pts: np.ndarray, target_grid_siz
     # Stack the result into a new control points array
     return np.column_stack([x_grid.ravel(), y_grid.ravel(), z_grid.ravel()])
 
+def strike(text: str) -> str:
+    return ''.join(c + '\u0336' for c in text)
 
 class Optimizer:
     """
@@ -113,22 +115,60 @@ class Optimizer:
         args: namespace with grid_w, grid_h, samples_u, samples_v, alpha, eps, tol, verbosity, fast...
         """
         self.config = config
+        self.prevScore = None
+        self.prevCtrl = None
+        self.noisy = False
         if not _ctrl is None:
             assert not _scorer is None and not _alpha is None
             self.ctrl = _ctrl
             self.W, self.H = infer_grid(self.ctrl)
             self.N = _ctrl.shape[0]
             self.scorer = _scorer
-            self.lr = self.scorer.maxDZ * _alpha
+            self.lr = _alpha
             print("LR is : ----> ", self.lr)
             self._score_window = collections.deque(maxlen=self.config.tunning_window)
             self._big_window_len = 10 * self.config.tunning_window
             self._score_window_big = collections.deque(maxlen=self._big_window_len)
-            self.avgChangeTolBig = self.config.tunning_avgChangeTol * 60
+            self.avgChangeTolBig = self.config.tunning_avgChangeTol * 10
+            self.badLR = 1e6
+
+    def resetConfirmUpdate(self):
+        self.prevScore = None
+        self.prev2ctrl = None
+        self.prevCtrl = None
+
+    def confirmUpdate(self, score, ctrl):
+        if self.prevScore is None:
+            self.prevScore = score
+            self.ctrl = ctrl.copy()
+            self.noisy = False
+            return True
+        self.noisy = score <= self.prevScore
+        self.prevScore = score
+        if self.noisy:
+            self.badLR = self.lr
+            self.lr /= 32
+            self.it -= 3
+            self.ctrl = self.prev2ctrl
+            if self.ctrl is None:
+                self.ctrl = self.prev3ctrl
+            self.resetConfirmUpdate()
+            return False
+        else:
+            new_lr = 2 * self.lr
+            if new_lr < self.badLR:
+                self.lr = new_lr
+            if self.prev2ctrl is not None:
+                self.prev3ctrl = self.prev2ctrl
+            if self.prevCtrl is not None:
+                self.prev2ctrl = self.prevCtrl.copy()
+            self.prevCtrl = self.ctrl.copy()
+            self.ctrl = ctrl.copy()
+            return True
 
     # ---- Headless run loop (FAST). --move_all toggles behavior here ONLY. ----
     def tune(self, initial_guess, scorer, iters, alpha):
-        self.lr = scorer.maxDZ * alpha
+        self.lr = alpha
         print("LR is : ----> ", self.lr)
         self.ctrl = initial_guess
         self.scorer = scorer
@@ -137,40 +177,25 @@ class Optimizer:
         self._score_window = collections.deque(maxlen=self.config.tunning_window)
         self._big_window_len = 10 * self.config.tunning_window
         self._score_window_big = collections.deque(maxlen=self._big_window_len)
-        self.avgChangeTolBig = self.config.tunning_avgChangeTol * 60
-
-        """
-        Headless loop. If self.config.tunning_moveAll is True, do uniform shift each iter.
-        Otherwise do per-point serial updates.
-        """
-        iter_count = 0
-        last_score = None
-        for it in range(iters):
-            if self.config.tunning_moveAll:
-                dJdB = self.uniform_shift_grad()
-                step = self.lr * dJdB
-                self.ctrl[:, 2] = self.ctrl[:, 2] + step
-                max_step = abs(step)
-            else:
-                max_step = 0.0
-                for i in range(self.N):
-                    if self.config.tunning_partialGrad:
-                        dJdZ = self.central_diff_partial_grad(i)
-                    else:
-                        dJdZ = self.central_diff_grad(i)
-                    step = self.lr * dJdZ
-                    self.ctrl[i, 2] = float(self.ctrl[i, 2]) + step
-                    if abs(step) > max_step:
-                        max_step = abs(step)
-
+        self.avgChangeTolBig = self.config.tunning_avgChangeTol * 10
+        self.resetConfirmUpdate()
+        self.badLR = 1e6
+        self.it = -1
+        while self.it < iters:
+            self.it += 1
+            if self.ctrl is not None:
+                ctrl = self.ctrl.copy()
+            for i in range(self.N):
+                dJdZ = self.central_diff_grad(i)
+                step = self.lr * dJdZ
+                ctrl[i, 2] = float(self.ctrl[i, 2]) + step
             score, _ = self.scorer.score(bspline_surface_mesh_from_ctrl(
-                self.ctrl, self.W, self.H, self.config.spline_mesh_samples_u, self.config.spline_mesh_samples_v))
-            iter_count += 1
-
+                ctrl, self.W, self.H, self.config.spline_mesh_samples_u, self.config.spline_mesh_samples_v))
             # update history window
+            r = self.confirmUpdate(score=score, ctrl=ctrl)
             self._score_window.append(float(score))
             self._score_window_big.append(float(score))
-
+            # isn, _ = self.nd.eval(score=score)
             # new: sliding-window stopping checks
             cut, var, var_big = self._should_stop()
             if cut:
@@ -179,15 +204,17 @@ class Optimizer:
             if self.config.verbosity == "tiny":
                 if var is not None:
                     if var_big is None:
-                        print(f"run internal optimization loop iteration {it} - score: {score:.2f} - var: {var:.5f}")
+                        text = f"internal opt it: {self.it} - sc: {score:.2f} - noisy: {self.noisy} - lr: {self.lr:.5f} - var: {var:.5f}"
                     else:
-                        print(f"run internal optimization loop iteration {it} - score: {score:.2f} - var: {var:.5f} - var_big: {var_big:.4f}")
+                        text = f"internal opt it: {self.it} - sc: {score:.2f} - noisy: {self.noisy} - lr: {self.lr:.5f} - var: {var:.5f} - var_big: {var_big:.4f}"
                 else:
-                    print(f"run internal optimization loop iteration {it} - score: {score:.2f}")
+                    text = f"internal opt it: {self.it} - sc: {score:.2f} - noisy: {self.noisy} - lr: {self.lr:.5f}"
 
-            last_score = score
-
-        return iter_count, score, self.ctrl[:, 2]
+            if r:        
+                print(text)
+            else:
+                print(strike(text))
+        return self.ctrl[:, 2]
 
     def _should_stop(self):
         """
@@ -245,22 +272,6 @@ class Optimizer:
         #     return True
         return ret, avg_rel_change, avg_rel_change_big
 
-    def central_diff_partial_grad(self, i):
-        """Compute central-difference gradient of score wrt ctrl[i,2]."""
-        # +eps
-        ctrl_p = self.ctrl.copy()
-        ctrl_p[i, 2] += self.config.tunning_eps
-        mesh_p = get_submesh_on_index(i, self.W, self.H, ctrl_pts=ctrl_p,
-                                      su=self.config.spline_mesh_samples_u, sv=self.config.spline_mesh_samples_v)
-        Jp, _ = self.scorer.score(mesh_p, True)
-
-        ctrl_m = self.ctrl.copy()
-        ctrl_m[i, 2] -= self.config.tunning_eps
-        mesh_m = get_submesh_on_index(i, self.W, self.H, ctrl_pts=ctrl_m,
-                                      su=self.config.spline_mesh_samples_u, sv=self.config.spline_mesh_samples_v)
-        Jm, _ = self.scorer.score(mesh_m, True)
-        return (Jp - Jm) / (2.0 * self.config.tunning_eps)
-
     def central_diff_grad(self, i):
         """Compute central-difference gradient of score wrt ctrl[i,2]."""
         # +eps
@@ -307,15 +318,4 @@ class Optimizer:
             self.ctrl, self.W, self.H, self.config.spline_mesh_samples_u, self.config.spline_mesh_samples_v))
         return score, self.ctrl[:, 2]
 
-    # ---- Uniform-shift operation (GUI 'M') ----
-    def iterate_once_move_all(self):
-        """Apply a single uniform Z shift using ∂J/∂(global shift)."""
-        dJdB = self.uniform_shift_grad()
-        step = self.lr * dJdB
-        self.ctrl[:, 2] = self.ctrl[:, 2] + step
-        if self.config.verbosity == "full":
-            log_point_update(self.args, 0, None, float(self.ctrl[0, 2]), self.lr, dJdB, label="dJ/d(shift)")
-        score, _ = self.scorer.score(bspline_surface_mesh_from_ctrl(
-            self.ctrl, self.W, self.H, self.config.spline_mesh_samples_u, self.config.spline_mesh_samples_v))
-        return score, self.ctrl[:, 2]
 

@@ -8,6 +8,8 @@ import matplotlib.pyplot as plt
 from .helper import *
 from geom.surfaces import bspline_surface_mesh_from_ctrl, infer_grid
 from utils.o3dviz import mat_mesh, fit_camera
+from kinematics.transformations import apply_transform_mesh
+from kinematics.mesh import translate_mesh
 
 class VisMode(Enum):
     Null = auto()
@@ -80,8 +82,12 @@ class Mapper3D:
 
         if bg is not None:
             assert mc is not None
-            w, h = infer_grid(bg)
-            mesh = bspline_surface_mesh_from_ctrl(bg+mc, w, h, self.config.mesh_u, self.config.mesh_v)
+            # mesh_ = bspline_surface_mesh_from_ctrl(bg.points_xyz, bg.grid_w, bg.grid_h, 
+            #                                        self.config.mesh_u, self.config.mesh_v)
+            # m = apply_transform_mesh(mesh_, T=bg.T_inv)
+            # mesh = translate_mesh(m, mc.T)
+            mesh = bg
+            mesh.points = o3d.utility.Vector3dVector(np.asarray(mesh.points) + mc)
         else:
             mesh = None
         
@@ -129,8 +135,3 @@ class Mapper3D:
         pcd.colors = o3d.utility.Vector3dVector(colors[:, [2,1,0]])
         return pcd
 
-
-if __name__ == "__main__":
-    # Example usage with dummy data
-    config = Mapper3DConfig(hfov_deg=60.0, visMode=VisMode.MSingle)
-    mapper = Mapper3D(config)

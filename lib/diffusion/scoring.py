@@ -8,7 +8,7 @@ sys.path.append(dir_path + "/..")
 from geom.surfaces import project_external_along_normals_andreject, \
     project_external_along_normals_noreject, nearest_vertex_normals
 from .config import BGPatternDiffuserConfig
-from .helper import score_based_downsample
+from .helper import score_based_downsample, uniform_downsample
 
 # Utility: compute base smoothness from a neighbor set and a tangent plane (V, n_hat)
 def _base_smoothness_on_plane(neigh_pts: np.ndarray, V: np.ndarray, n_hat: np.ndarray) -> float:
@@ -165,12 +165,6 @@ def calculate_smoothness_score(ext_pts: np.ndarray, ndfDists: np.ndarray, k: int
 
     return smoothness_scores
 
-
-
-# =========================
-# Main pipeline (as a function)
-# =========================
-
 def associate_compound_score(
     ext_pts: np.ndarray,
     mesh,
@@ -191,19 +185,19 @@ def associate_compound_score(
     ndf_scores = ndf_to_score(ndf_dists)
 
     # Smoothness (adaptive R from density)
-    smoothness_scores = calculate_smoothness_score(
-        ext_pts=ext_pts,
-        ndfDists=ndf_dists,
-        k=K_for_radius
-    )
+    # smoothness_scores = calculate_smoothness_score(
+    #     ext_pts=ext_pts,
+    #     ndfDists=ndf_dists,
+    #     k=K_for_radius
+    # )
 
     # Compound
     # compound_scores = smoothness_scores * ndf_scores
     compound_scores = ndf_scores
     # compound_scores = smoothness_scores
 
-    return compound_scores, smoothness_scores, ndf_scores, mesh, proj_pts
-    # return compound_scores, None, ndf_scores, mesh, proj_pts
+    # return compound_scores, smoothness_scores, ndf_scores, mesh, proj_pts
+    return compound_scores, None, ndf_scores, mesh, proj_pts
     # return compound_scores, smoothness_scores, None, mesh, proj_pts
 
 
@@ -215,7 +209,7 @@ class Projection3DScorer:
     
     def reset(self, _cloud_pts: np.ndarray,
               smoothness_base_mesh: o3d.geometry.TriangleMesh, max_dz: float,
-              original_colors: np.ndarray | None = None, fine_tune: bool = False):
+              original_colors: np.ndarray | None = None, fine_tune: bool = False, sb_ds=True):
         self.maxDZ = max_dz
         self.tau = max(1e-9, self.maxDZ / 3.0)
         self.cloud_pts = np.asarray(_cloud_pts, dtype=float)
@@ -226,21 +220,31 @@ class Projection3DScorer:
                 ext_pts=self.cloud_pts,
                 mesh=smoothness_base_mesh,
                 K_for_radius=self.config.scoring_smoothness_k)
-        downsampled_pts, s, _ = score_based_downsample(self.cloud_pts, 
-                                                                            _scores,
-                                                                            target_fraction=self.config.scorebased_downsample_target)
-        if self.fineTune:
-            self.smoothness_scores = s
-        else: 
+        
+        if sb_ds:
+            downsampled_pts, downsampled_scores, mask = score_based_downsample(self.cloud_pts, _scores,
+                                                        target_fraction=self.config.scoring_downsample_frac)
+        else:
+            downsampled_pts, mask = uniform_downsample(self.cloud_pts, self.config.scoring_downsample_frac)
+        downsampled_scores = _scores[mask]
+        oc = []
+        for k, el in enumerate(original_colors):
+            if mask[k]:
+                oc.append(original_colors[k])
+        self.original_colors = np.array(oc)
+
+        if fine_tune:
+            self.smoothness_scores = downsampled_scores
+        else:
             self.smoothness_scores = self.self_associate_smoothness(downsampled_pts)
 
         il = self.cloud_pts.shape[0]                                                                                
         self.cloud_pts = np.asarray(downsampled_pts, dtype=float)
         print(f"[Projection3DScorer] Point clound downsampled from {il} to {downsampled_pts.shape[0]}")
         self._point_scores = None
-        self.original_colors = None
-        if original_colors is not None and len(original_colors) == len(self.cloud_pts):
-            self.original_colors = np.asarray(original_colors, dtype=float)
+        # self.original_colors = 
+        # if original_colors is not None and len(original_colors) == len(self.cloud_pts):
+        #     self.original_colors = np.asarray(original_colors, dtype=float)
 
     # ----- reset spline mesh -----
     def reset_smoothness_base_mesh(self, new_mesh: o3d.geometry.TriangleMesh):
