@@ -1,5 +1,6 @@
 from enum import Enum, auto
 import threading
+import cv2
 import open3d as o3d
 import open3d.visualization.gui as gui
 from dataclasses import dataclass
@@ -8,6 +9,7 @@ import matplotlib.pyplot as plt
 from .helper import *
 from geom.surfaces import bspline_surface_mesh_from_ctrl, infer_grid
 from utils.o3dviz import mat_mesh, fit_camera
+from diffusion.helper import downsample_pcd
 
 class VisMode(Enum):
     Null = auto()
@@ -22,6 +24,7 @@ class Mapper3DConfig:
     color_mode: str = 'constant'  # 'image' | 'proximity' | 'constant' | 'none'
     mesh_u: int = 40
     mesh_v: int = 40
+    downsample_dstW: int = 300
 
 class Mapper3D:
     def __init__(self, config: Mapper3DConfig, fuser = None):
@@ -89,6 +92,7 @@ class Mapper3D:
             projected_pc = fresh_pc
         else:
             assert mesh is not None
+            fresh_pc = self.downsample_pcm(fresh_pc, self.config.downsample_dstW)
             projected_pc = self.fuser.fuse_flat_ground(pose, fresh_pc, mesh)
             mesh = None
 
@@ -113,6 +117,8 @@ class Mapper3D:
         points = pcm.reshape(-1, 3)
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(points)
+        if self.fuser is not None:
+            visualization_image = self.downsample_pcm(visualization_image, self.config.downsample_dstW)
         if self.config.color_mode == 'image':
             assert visualization_image is not None
             h, w, _ = visualization_image.shape
@@ -128,6 +134,36 @@ class Mapper3D:
             raise ValueError(f"Unknown color_mode: {self.config.color_mode}")
         pcd.colors = o3d.utility.Vector3dVector(colors[:, [2,1,0]])
         return pcd
+    
+    def downsample_pcm(self, pcm: np.ndarray, W_final: int) -> np.ndarray:
+        """
+        Downsample a PCM (H, W, 3) numpy array to a target width, keeping aspect ratio.
+        
+        Args:
+            pcm (np.ndarray): Input PCM array of shape (H, W, 3)
+            W_final (int): Desired final width after downsampling
+            
+        Returns:
+            np.ndarray: Downsampled PCM array (H_new, W_final, 3)
+        """
+        # --- Validation ---
+        if not isinstance(pcm, np.ndarray):
+            raise TypeError("pcm must be a numpy array")
+        if pcm.ndim != 3 or pcm.shape[2] != 3:
+            raise ValueError("pcm must have shape (H, W, 3)")
+        if W_final <= 0:
+            raise ValueError("W_final must be a positive integer")
+
+        H, W, _ = pcm.shape
+
+        # --- Compute new size while keeping aspect ratio ---
+        ratio = W_final / W
+        H_final = int(H * ratio)
+
+        # --- Downsample using OpenCV with area interpolation ---
+        pcm_down = cv2.resize(pcm, (W_final, H_final), interpolation=cv2.INTER_AREA)
+
+        return pcm_down
 
 
 if __name__ == "__main__":

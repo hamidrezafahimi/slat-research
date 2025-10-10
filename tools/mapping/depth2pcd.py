@@ -3,7 +3,8 @@ import sys
 dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(dir_path + "/../../lib")
 from kinematics.pose import Pose
-from mapper3D_helper import *
+# from mapper3D_helper import *
+from projection.helper import project3DAndScale
 import numpy as np
 import open3d as o3d
 import cv2
@@ -42,10 +43,10 @@ if __name__ == "__main__":
     metric_depth_path, color_path = sys.argv[1:3]
 
     # hfov_deg = 80.0
-    hfov_deg = 66.0
+    hfov_deg = 90.0
 
     # p = Pose(x=0,y=0,z=1.7,roll=0,pitch=-0.15,yaw=0)
-    p = Pose(x=0,y=0,z=9.4,roll=0,pitch=-0.78,yaw=0)
+    p = Pose(x=0,y=0,z=771,roll=0,pitch=-1.57,yaw=0)
 
     # metric_depth = np.loadtxt(metric_depth_path, delimiter=',', dtype=np.float32)[200:,:]
     metric_depth = np.loadtxt(metric_depth_path, delimiter=',', dtype=np.float32)
