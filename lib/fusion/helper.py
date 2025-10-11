@@ -1,5 +1,8 @@
 import numpy as np
 import os, sys
+
+from kinematics.transformations import rotation_matrix_x
+from utils.typeConversion import pcm2pcd
 dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(dir_path + "/..")
 from kinematics.pose import Pose
@@ -74,40 +77,6 @@ def print_report(query_pts, best_in_idxs, best_out_idxs,
             else:
                 print("  Outside → none")
         print(sep)
-
-def xyz_image_to_o3d_pcd(xyz: np.ndarray, *, drop_invalid: bool = True) -> o3d.geometry.PointCloud:
-    """
-    Convert an H×W×3 (or N×3) array of XYZ coordinates to an Open3D PointCloud.
-
-    Parameters
-    ----------
-    xyz : np.ndarray
-        Array of shape (H, W, 3) or (N, 3). Units are up to you (e.g., meters).
-        Invalid/missing points should be np.nan.
-    drop_invalid : bool, default True
-        If True, remove any rows containing NaN/Inf before creating the point cloud.
-
-    Returns
-    -------
-    o3d.geometry.PointCloud
-        Unorganized point cloud (Open3D does not keep H/W organization).
-    """
-    if xyz.ndim == 3 and xyz.shape[2] == 3:
-        pts = xyz.reshape(-1, 3)
-    elif xyz.ndim == 2 and xyz.shape[1] == 3:
-        pts = xyz
-    else:
-        raise ValueError("xyz must be (H, W, 3) or (N, 3)")
-
-    pts = np.asarray(pts, dtype=np.float64)
-
-    if drop_invalid:
-        mask = np.isfinite(pts).all(axis=1)
-        pts = pts[mask]
-
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(pts)
-    return pcd
 
 def _normalize_rows(x, eps=1e-12):
     n = np.linalg.norm(x, axis=1, keepdims=True)
@@ -1337,8 +1306,8 @@ def move_depth(depth_image, bg_image, gep_image):
     return moved_depth
 
 def calc_ground_depth(hfov_degs,
-                      pitch_rad,
                       output_shape,
+                      p,
                       fixed_alt=10.0,
                       horizon_pitch_rad=-0.034):
     """
@@ -1363,20 +1332,22 @@ def calc_ground_depth(hfov_degs,
     norm = np.sqrt(X**2 + Y**2 + Z**2)
     dirs_cam = np.stack([X / norm, Y / norm, Z / norm], axis=-1)
 
-    # --- 3) camera  ->  NED -------------------------------------------
-    Ry90neg = np.array([[ 0, 0, 1],
-                        [ 0, 1, 0],
-                        [-1, 0, 0]])
-    Rx90neg = np.array([[1, 0,  0],
-                        [0, 0, -1],
-                        [0, 1,  0]])
-    dirs_ned = dirs_cam @ (Rx90neg @ Ry90neg).T
+    # # --- 3) camera  ->  NED -------------------------------------------
+    # Ry90neg = np.array([[ 0, 0, 1],
+    #                     [ 0, 1, 0],
+    #                     [-1, 0, 0]])
+    # Rx90neg = np.array([[1, 0,  0],
+    #                     [0, 0, -1],
+    #                     [0, 1,  0]])
+    # dirs_ned = dirs_cam @ (Rx90neg @ Ry90neg).T
 
-    # --- 4) apply camera pitch about +Y in NED ------------------------
-    Ry = np.array([[ np.cos(-pitch_rad), 0, -np.sin(-pitch_rad)],
-                   [ 0,                  1,  0               ],
-                   [ np.sin(-pitch_rad), 0,  np.cos(-pitch_rad)]])
-    dirs = dirs_ned @ Ry.T                     # final unit directions
+    # # --- 4) apply camera pitch about +Y in NED ------------------------
+    # pitch_rad = -1.57
+    # Ry = np.array([[ np.cos(-pitch_rad), 0, -np.sin(-pitch_rad)],
+    #                [ 0,                  1,  0               ],
+    #                [ np.sin(-pitch_rad), 0,  np.cos(-pitch_rad)]])
+    # dirs_ = dirs_ned @ Ry.T                     # final unit directions
+    dirs = dirs_cam @ (rotation_matrix_x(np.pi).T @ p.getCAM2NWU().T)
 
     # --- 5) ray pitch angle & ground intersection --------------------
     horiz_len     = np.linalg.norm(dirs[..., :2], axis=-1)
@@ -1404,10 +1375,11 @@ def calc_ground_depth(hfov_degs,
     depth_img     = np.minimum(depth_img, 255.0)                # clamp just in case
     return depth_img
 
-def unfold_depth(dpc, bpc, gpc):
-    dpc_pcd = xyz_image_to_o3d_pcd(dpc)
-    bpc_pcd = xyz_image_to_o3d_pcd(bpc)
-    gpc_pcd = xyz_image_to_o3d_pcd(gpc)
+def unfold_depth(dpc, bpcd, gpc):
+    dpc_pcd = pcm2pcd(dpc)
+    # bpc_pcd = pcm2pcd(bpc)
+    bpc_pcd = bpcd
+    gpc_pcd = pcm2pcd(gpc)
     
     bpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
     bpc_pcd = bpc_pcd.voxel_down_sample(0.02)
@@ -1456,9 +1428,9 @@ def ndfDrop_depth(dpc, bpc, gpc):
 
     nan_indices = np.argwhere(np.isnan(bpc).any(axis=2))
     print("Indices of points with NaN -> bpc: ", len(nan_indices))
-    dpc_pcd = xyz_image_to_o3d_pcd(dpc)
-    bpc_pcd = xyz_image_to_o3d_pcd(bpc)
-    gpc_pcd = xyz_image_to_o3d_pcd(gpc)
+    dpc_pcd = pcm2pcd(dpc)
+    bpc_pcd = pcm2pcd(bpc)
+    gpc_pcd = pcm2pcd(gpc)
 
     if len(bpc_pcd.points) == 0:
         raise ValueError("bpc_pcd is empty, cannot proceed.")
@@ -1519,7 +1491,7 @@ def ndfDrop_depth(dpc, bpc, gpc):
 
     # # Visualize
     
-    # sss = xyz_image_to_o3d_pcd(proj_g)
+    # sss = pcm2pcd(proj_g)
     # o3d.visualization.draw_geometries([line_set, bpc_pcd, dpc_pcd, sss, *spheres])
 
     # exit()
@@ -1529,7 +1501,7 @@ def ndfDrop_depth(dpc, bpc, gpc):
     proj_b = project_points_multi_fast(bpc_pcd, dpc, k=8, just_proj=True)
     print("unfold_surface")
     proj_g, _ = unfold_surface(bpc, hfov_deg=80.0)
-    g_pcd = xyz_image_to_o3d_pcd(proj_g)
+    g_pcd = pcm2pcd(proj_g)
 
     proj_b_idx = map_pc_proj_to_index(proj_b, bpc) # H * W * 2
     proj_b_idx_i = np.int32(proj_b_idx)
@@ -1552,12 +1524,12 @@ def ndfDrop_depth(dpc, bpc, gpc):
     nan_indices = np.argwhere(np.isnan(unfolded_dpc).any(axis=2))
     print("Indices of points with NaN -> unfolded_dpc: ", len(nan_indices))
 
-    pc1 = xyz_image_to_o3d_pcd(unfolded_dpc)
+    pc1 = pcm2pcd(unfolded_dpc)
     unfolded_dpc_1 = unfolded_dpc.copy()
     proj_g = project_points_multi_fast(gpc_pcd, proj_b, k=8, just_proj=True)
     unfolded_dpc = proj_g.copy()                          # H * W * 3
     unfolded_dpc[:, :, 2:3] += dist
-    pc2 = xyz_image_to_o3d_pcd(unfolded_dpc)
+    pc2 = pcm2pcd(unfolded_dpc)
 
     # Paint point clouds
     pc1.paint_uniform_color([0, 1, 0])  # green
@@ -1570,7 +1542,7 @@ def ndfDrop_depth(dpc, bpc, gpc):
     return unfolded_dpc
 
 def rescale_depth(depth_image, bg_image, pitch):
-    gep_f = calc_ground_depth(66.0, pitch_rad=pitch, output_shape=depth_image.shape)
+    gep_f = calc_ground_depth(66.0, Pose, output_shape=depth_image.shape)
     # Convert to float32
     depth_f = depth_image.astype(np.float32)
     bg_f = bg_image.astype(np.float32)

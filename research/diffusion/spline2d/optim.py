@@ -50,7 +50,7 @@ def print_manual(args, N):
 def main():
     ap = argparse.ArgumentParser(description="Classic Open3D viewer + terminal-logged Z-only optimization of control points.")
     ap.add_argument("--in", dest="inp", required=True, help="Input point cloud (.pcd/.ply/.xyz/.npy/.npz)")
-    ap.add_argument("--initial_guess", required=True, help="CSV of control points (x,y,z)")
+    ap.add_argument("--initial_guess", help="CSV of control points (x,y,z)")
     ap.add_argument("--base_ctrl", type=str, help="CSV of control points to generate ground smoothness criteria")
     ap.add_argument("--samples_u", type=int, default=40)
     ap.add_argument("--samples_v", type=int, default=40)
@@ -58,11 +58,13 @@ def main():
     ap.add_argument("--kmin_neighbors", type=int, default=8)
     ap.add_argument("--max_dz", type=float, default=0.5)
     ap.add_argument("--tau", type=float, default=None)
-    ap.add_argument("--alpha", type=float, default=0.15)
+    ap.add_argument("--alpha", type=float, default=0.002)
     ap.add_argument("--out", type=str, required=True)
     ap.add_argument("--eps", type=float, default=1e-3, help="Epsilon for central diff grad wrt z.")
     ap.add_argument("--iters", type=int, default=100, help="Headless: run N full iterations without viewer.")
     ap.add_argument("--max_iters", type=int, default=100, help="Max full iterations in continuous mode.")
+    ap.add_argument("--sb_ds", action="store_true")
+    ap.add_argument("--fine_tune", action="store_true")
     ap.add_argument("--tol", type=float, default=1e-8, help="Stopping threshold for continuous mode on max |alpha*d|.")
     ap.add_argument("--downsample", type=float, default=None, help="Stopping threshold for continuous mode on max |alpha*d|.")
     ap.add_argument("--verbosity", choices=["full", "tiny", "none"], default="full",
@@ -87,9 +89,12 @@ def main():
         orig_cols = np.asarray(pcd.colors, dtype=float)
 
     # load control net
-    ctrl_pts = np.loadtxt(args.initial_guess, delimiter=",", dtype=float)
-    if ctrl_pts.ndim != 2 or ctrl_pts.shape[1] != 3:
-        raise SystemExit("[ERROR] --initial_guess must be (N,3) CSV of x,y,z.")
+    if args.initial_guess:
+        ctrl_pts = np.loadtxt(args.initial_guess, delimiter=",", dtype=float)
+        if ctrl_pts.ndim != 2 or ctrl_pts.shape[1] != 3:
+            raise SystemExit("[ERROR] --initial_guess must be (N,3) CSV of x,y,z.")
+    else:
+        _, ctrl_pts, _,_,_,_ = cg_centeric_xy_spline(cloud_pts=cloud_pts, grid_w=3, grid_h=3)
 
     # automatically infer grid size from x,y of ctrl points
     N = ctrl_pts.shape[0]
@@ -119,7 +124,7 @@ def main():
 
     # FAST (headless) path: here --move_all decides behavior
     scorer = Projection3DScorer(cfg)
-    scorer.reset(cloud_pts, smoothness_base_mesh=base_mesh, max_dz=args.max_dz)
+    scorer.reset(cloud_pts, smoothness_base_mesh=base_mesh, max_dz=args.max_dz, fine_tune=args.fine_tune, sb_ds=args.sb_ds)
     if args.fast:
         optimizer = Optimizer(cfg)
         iters_done, final_score, final_z = optimizer.tune(ctrl_pts.copy(), scorer, iters=args.iters,

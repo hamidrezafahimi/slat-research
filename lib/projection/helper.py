@@ -14,15 +14,11 @@ def calc_scale_factor(desired_altitude, pc_to_be_rescaled):
     return desired_altitude / min_z
 
 def project3DAndScale(depth_img, pose, hfov_deg, move=False):
-    pc, dirs = depthImage2pointCloud(depth_img, roll_rad=pose._roll_rad, 
-                                     pitch_rad=pose._pitch_rad, yaw_rad=pose._yaw_rad,
-                                     horizontal_fov=hfov_deg)
-    scale_factor = calc_scale_factor(-abs(pose.z), pc)
-    pc_scaled, dirs = depthImage2pointCloud(depth_img, roll_rad=pose._roll_rad, 
-                                            pitch_rad=pose._pitch_rad, yaw_rad=pose._yaw_rad,
-                                    horizontal_fov=hfov_deg, scale_factor=scale_factor)
+    pc, dirs = depthImage2pointCloud(depth_img, hfov_deg, pose)
+    scale_factor = calc_scale_factor(-abs(pose.p6.z), pc)
+    pc_scaled, dirs = depthImage2pointCloud(depth_img,hfov_deg, pose, scale_factor=scale_factor)
     if move:
-        p = np.array([[pose.x], [pose.y], [pose.z]])
+        p = np.array([[pose.p6.x], [pose.p6.y], [pose.p6.z]])
         move_const = p.T
         pc_scaled += move_const
     else:
@@ -32,9 +28,7 @@ def project3DAndScale(depth_img, pose, hfov_deg, move=False):
 
 def depthImage2pointCloud(D,
                           horizontal_fov,
-                          roll_rad,
-                          pitch_rad,
-                          yaw_rad,
+                          p,
                           scale_factor = None,
                           abs_alt=0,
                           mask=None):
@@ -61,17 +55,8 @@ def depthImage2pointCloud(D,
 
     dirs = _img2dirVecsCam(D.shape, horizontal_fov)
 
-    # Camera-to-body and body-to-earth rotations
-    Ry = np.array([[ 0,  0, 1], [0, 1, 0], [-1, 0, 0]])
-    Rx = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
-    Rphi   = rotation_matrix_x(-roll_rad)
-    Rtheta = rotation_matrix_y(-pitch_rad)
-    Rpsi   = rotation_matrix_z(-yaw_rad)
-    Rnwu   = rotation_matrix_x(np.pi)
-    R = Rnwu @ Rpsi @ Rtheta @ Rphi @ Rx @ Ry
-
     # Rotate direction vectors into NWU frame
-    dirs_nwu = dirs @ R.T
+    dirs_nwu = dirs @ p.getCAM2NWU().T
 
     # Scale by depth and altitude
     pc1 = dirs_nwu * (D[..., np.newaxis])

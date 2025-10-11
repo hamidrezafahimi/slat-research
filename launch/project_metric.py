@@ -13,7 +13,7 @@ def main():
 
     # Config
     cfg = Mapper3DConfig(color_mode='image',   # Options: 'image', 'proximity', 'constant', 'none'
-                         hfov_deg=io.yaml_data["hfov_deg"])
+                         hfov_deg=io.cfg["hfov_deg"])
 
     if io.getDoFuse():
         fcfg = BGPatternFuserConfig(

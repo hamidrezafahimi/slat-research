@@ -71,3 +71,94 @@ def transform_camera_to_nwu(points, cam_pose, roll, pitch, yaw):
     # points_out = points @ R.T
     points_out = points_translated @ R.T
     return points_out
+
+
+def rodrigues_rotation_matrix(from_vec: np.ndarray, to_vec: np.ndarray) -> np.ndarray:
+    v1 = from_vec / (np.linalg.norm(from_vec) + 1e-12)
+    v2 = to_vec / (np.linalg.norm(to_vec) + 1e-12)
+    cross = np.cross(v1, v2)
+    dot = np.clip(np.dot(v1, v2), -1.0, 1.0)
+    if np.linalg.norm(cross) < 1e-12:
+        if dot > 0:
+            return np.eye(3)
+        else:
+            axis = np.array([1.0, 0.0, 0.0])
+            if abs(v1[0]) > 0.9:
+                axis = np.array([0.0, 1.0, 0.0])
+            axis = axis - v1 * np.dot(axis, v1)
+            axis /= (np.linalg.norm(axis) + 1e-12)
+            K = np.array([[0, -axis[2], axis[1]],
+                          [axis[2], 0, -axis[0]],
+                          [-axis[1], axis[0], 0]])
+            return np.eye(3) + 2 * K @ K
+    axis = cross / (np.linalg.norm(cross) + 1e-12)
+    angle = np.arccos(dot)
+    K = np.array([[0, -axis[2], axis[1]],
+                  [axis[2], 0, -axis[0]],
+                  [-axis[1], axis[0], 0]])
+    R = np.eye(3) + np.sin(angle) * K + (1 - np.cos(angle)) * (K @ K)
+    return R
+
+import open3d as o3d
+
+def apply_transform_mesh(
+    mesh: o3d.geometry.TriangleMesh,
+    T: np.ndarray,
+    *,
+    inplace: bool = False
+) -> o3d.geometry.TriangleMesh:
+    """
+    Apply a 4x4 homogeneous transform to an Open3D TriangleMesh.
+
+    Convention: x' = R x + t, with R = T[:3,:3], t = T[:3,3].
+
+    Args
+    ----
+    mesh : o3d.geometry.TriangleMesh
+        Input mesh.
+    T : (4,4) array-like
+        Homogeneous transform.
+    inplace : bool (default False)
+        If True, modify the input mesh in-place and return it.
+        If False, work on a copy and return the transformed copy.
+
+    Returns
+    -------
+    o3d.geometry.TriangleMesh
+        Transformed mesh (same object if inplace=True).
+    """
+    if not isinstance(mesh, o3d.geometry.TriangleMesh):
+        raise TypeError("mesh must be an Open3D TriangleMesh.")
+
+    T = np.asarray(T, dtype=float)
+    if T.shape != (4, 4):
+        raise ValueError(f"T must be shape (4,4); got {T.shape}")
+
+    R = T[:3, :3]
+    t = T[:3, 3]
+
+    # choose target mesh
+    out = mesh if inplace else (mesh.clone() if hasattr(mesh, "clone") else o3d.geometry.TriangleMesh(mesh))
+
+    # vertices
+    V = np.asarray(out.vertices, dtype=float)
+    V[...] = V @ R.T + t  # x' = R x + t
+
+    # vertex normals
+    if out.has_vertex_normals():
+        N = np.asarray(out.vertex_normals, dtype=float)
+        N[...] = N @ R.T
+        # renormalize (avoid divide-by-zero)
+        nrm = np.linalg.norm(N, axis=1, keepdims=True)
+        nz = nrm.squeeze(-1) > 0
+        N[nz] /= nrm[nz]
+
+    # triangle normals (if present)
+    if out.has_triangle_normals():
+        TN = np.asarray(out.triangle_normals, dtype=float)
+        TN[...] = TN @ R.T
+        nrm = np.linalg.norm(TN, axis=1, keepdims=True)
+        nz = nrm.squeeze(-1) > 0
+        TN[nz] /= nrm[nz]
+
+    return out
