@@ -7,7 +7,7 @@ class BGPatternDiffuserConfig:
     output_dir: str
     coarsetune_iters: int = 400
     finetune_iters: int = 800
-    viz: bool = False
+    viz: bool = True
     coarsetune_grid_w: int = 3
     coarsetune_grid_h: int = 3
     shift_k: float = 1.2

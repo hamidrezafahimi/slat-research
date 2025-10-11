@@ -199,7 +199,7 @@ class Optimizer:
             # isn, _ = self.nd.eval(score=score)
             # new: sliding-window stopping checks
             cut, var, var_big = self._should_stop()
-            if cut:
+            if cut and self.it > 20:
                 break
 
             if self.config.verbosity == "tiny":
@@ -256,13 +256,13 @@ class Optimizer:
 
         if avg_rel_change < self.config.tunning_avgChangeTol:
             if self.config.verbosity:
-                print(f"Stopping because of 'avg_rel_change': {avg_rel_change} < {self.config.tunning_avgChangeTol}")
+                print(f"'avg_rel_change': {avg_rel_change} < {self.config.tunning_avgChangeTol}")
             ret = True
 
         if len(self._score_window_big) >= self._big_window_len:
             if avg_rel_change_big < self.avgChangeTolBig:
                 if self.config.verbosity:
-                    print(f"Stopping because of 'avg_rel_change_big': {avg_rel_change_big} < {self.avgChangeTolBig}")
+                    print(f"'avg_rel_change_big': {avg_rel_change_big} < {self.avgChangeTolBig}")
                 ret = True
         else:
             avg_rel_change_big = None

@@ -39,7 +39,6 @@ class RandomSurfacer:
     - generate(N) -> list[np.ndarray]: N random control grids with fixed (x,y) and z ~ U[Z_down, Z_up].
     - draw(random_ctrl_pts): renders ext cloud, base/top/bottom AND a *smooth random B-spline surface* from random_ctrl_pts.
     """
-
     def __init__(self, cloud, grid_w=6, grid_h=4, samples_u=40, samples_v=40, margin=0.02, seed=None):
         # ---- robust, instance-scoped RNG (ignores global np.random.seed) ----
         np.random.seed(0)

@@ -9,7 +9,7 @@ def main():
     io = IOHandler(False)
 
     cfg = BGPatternDiffuserConfig(
-        hfov_deg = 90.0,
+        hfov_deg = io.cfg["hfov_deg"],
         output_dir = io.getDataRootDir()
     )
 

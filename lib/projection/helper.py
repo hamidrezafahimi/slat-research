@@ -4,10 +4,9 @@ dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(dir_path + "/..")
 import numpy as np
 import open3d as o3d
-from scipy.interpolate import griddata, LinearNDInterpolator
+from scipy.interpolate import griddata
 import matplotlib.pyplot as plt
 import numpy as np
-from kinematics.transformations import rotation_matrix_x, rotation_matrix_y, rotation_matrix_z
 
 def calc_scale_factor(desired_altitude, pc_to_be_rescaled):
     min_z = np.nanmin(pc_to_be_rescaled[:,:,2])
@@ -23,47 +22,19 @@ def project3DAndScale(depth_img, pose, hfov_deg, move=False):
         pc_scaled += move_const
     else:
         move_const = None
-
     return pc_scaled, move_const
 
 def depthImage2pointCloud(D,
                           horizontal_fov,
                           p,
-                          scale_factor = None,
-                          abs_alt=0,
-                          mask=None):
+                          scale_factor = 1):
     """
-    Computes a point cloud from a depth image with optional masking.
-
-    Parameters:
-    - D (H, W): Depth image (in meters).
-    - horizontal_fov (float): Horizontal field of view in degrees.
-    - roll_rad, pitch_rad, yaw_rad (float): Orientation angles in radians.
-    - abs_alt (float): Altitude offset to add to the Z coordinate.
-    - mask (H, W) optional: Binary mask (0 or 255). If a pixel's mask value is 0, its Z coordinate is forced to 0.
-
-    Returns:
-    - pc (H, W, 3): Point cloud in NWU coordinates with masking applied.
+    Computes a point cloud from a depth image 
     """
-    # # Prepare mask: default all valid
-    if mask is None:
-        mask = np.full((D.shape[0], D.shape[1]), 255, dtype=np.uint8)
-    else:
-        mask = mask.astype(np.uint8)
-        unique_vals = np.unique(mask)
-        assert set(unique_vals).issubset({0, 255}), "binary mask should only have 0 or 255"
-
     dirs = _img2dirVecsCam(D.shape, horizontal_fov)
-
     # Rotate direction vectors into NWU frame
     dirs_nwu = dirs @ p.getCAM2NWU().T
-
     # Scale by depth and altitude
-    pc1 = dirs_nwu * (D[..., np.newaxis])
-
-    if scale_factor is None:
-        scale_factor = 1
-
     D2 = D * scale_factor
     pc1 = dirs_nwu * (D2[..., np.newaxis])
     return pc1, dirs_nwu
@@ -73,17 +44,15 @@ def _img2dirVecsCam(output_shape, hfov_degs):
     hfov_rad = np.radians(hfov_degs)
     focal_length = (W / 2) / np.tan(hfov_rad / 2)
     cx, cy = W / 2, H / 2
-
     # Generate direction vectors in camera frame
     x_idxs = np.arange(W)
     y_idxs = np.arange(H)
     x_grid, y_grid = np.meshgrid(x_idxs, y_idxs)
     X = (x_grid - cx) / focal_length
     Y = (y_grid - cy) / focal_length
-    # Z = np.sqrt(1-X**2-Y**2)
     Z = np.ones_like(X)
-    norm = np.sqrt(X**2 + Y**2 + Z**2)
-    X /= norm; Y /= norm; Z /= norm
+    # norm = np.sqrt(X**2 + Y**2 + Z**2)
+    # X /= norm; Y /= norm; Z /= norm
     return np.stack((X, Y, Z), axis=-1)  # (H, W, 3)
 
 

@@ -17,7 +17,7 @@ def main():
 
     if io.getDoFuse():
         fcfg = BGPatternFuserConfig(
-            hfov_deg=90.0
+            hfov_deg=io.cfg["hfov_deg"]
         )
         f = BGPatternFuser(config=fcfg)
         mapper = Mapper3D(cfg, fuser=f)

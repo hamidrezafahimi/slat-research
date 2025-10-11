@@ -9,4 +9,6 @@
 *.json
 *.pcd
 *.ply
+*.jpeg
+*.npy
 data/
