@@ -87,3 +87,6 @@ class Pose:
 
     def getCAM2NWU(self):
         return self.extmat[:3, :3]
+    
+    def getNWU2CAM(self):
+        return (self.extmat[:3, :3]).T

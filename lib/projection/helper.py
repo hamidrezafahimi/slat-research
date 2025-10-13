@@ -7,41 +7,44 @@ import open3d as o3d
 from scipy.interpolate import griddata
 import matplotlib.pyplot as plt
 import numpy as np
+from .config import Scaling
+import cv2
 
-def calc_scale_factor(desired_altitude, pc_to_be_rescaled):
-    min_z = np.nanmin(pc_to_be_rescaled[:,:,2])
-    return desired_altitude / min_z
+def calc_scale_factor(desired_altitude, scaling, pc_to_be_rescaled=None, bgz=None):
+    if scaling == Scaling.NULL:
+        assert pc_to_be_rescaled is not None
+        min_z = np.nanmin(pc_to_be_rescaled[:,:,2])
+        return -30 / min_z
+    elif scaling == Scaling.MIN_Z:
+        assert pc_to_be_rescaled is not None
+        min_z = np.nanmin(pc_to_be_rescaled[:,:,2])
+        return desired_altitude / min_z
+    elif scaling == Scaling.MEAN_Z:
+        assert bgz is not None, "MEAN_Z Scaling requires bgz provided"
+        mean_z = np.mean(bgz)
+        return desired_altitude / mean_z
+    elif scaling == Scaling.RESHAPE_BG_Z:
+        assert bgz is not None, "RESHAPE_BG_Z Scaling requires bgz provided" 
 
-def project3DAndScale(depth_img, pose, hfov_deg, move=False):
-    pc, dirs = depthImage2pointCloud(depth_img, hfov_deg, pose)
-    scale_factor = calc_scale_factor(-abs(pose.p6.z), pc)
-    pc_scaled, dirs = depthImage2pointCloud(depth_img,hfov_deg, pose, scale_factor=scale_factor)
+def project3D(depth_img, pose, hfov_deg, scaling, bg=None, move=False, pyramidProj=False):
+    pc, dirs = depthImage2pointCloud(depth_img, hfov_deg, pose, pyramidProj=pyramidProj)
+    scale_factor = calc_scale_factor(-abs(pose.p6.z), scaling, bgz=bg, pc_to_be_rescaled=pc)
+    pc, dirs = depthImage2pointCloud(depth_img,hfov_deg, pose, scale_factor=scale_factor, 
+                                     pyramidProj=pyramidProj)
     if move:
         p = np.array([[pose.p6.x], [pose.p6.y], [pose.p6.z]])
         move_const = p.T
-        pc_scaled += move_const
+        pc += move_const
     else:
         move_const = None
-    return pc_scaled, move_const
+    return pc, move_const
 
-def depthImage2pointCloud(D,
-                          horizontal_fov,
-                          p,
-                          scale_factor = 1):
+def depthImage2pointCloud(D, horizontal_fov, p, scale_factor = 1, pyramidProj=False):
     """
     Computes a point cloud from a depth image 
     """
-    dirs = _img2dirVecsCam(D.shape, horizontal_fov)
-    # Rotate direction vectors into NWU frame
-    dirs_nwu = dirs @ p.getCAM2NWU().T
-    # Scale by depth and altitude
-    D2 = D * scale_factor
-    pc1 = dirs_nwu * (D2[..., np.newaxis])
-    return pc1, dirs_nwu
-
-def _img2dirVecsCam(output_shape, hfov_degs):
-    H, W = output_shape
-    hfov_rad = np.radians(hfov_degs)
+    H, W = D.shape
+    hfov_rad = np.radians(horizontal_fov)
     focal_length = (W / 2) / np.tan(hfov_rad / 2)
     cx, cy = W / 2, H / 2
     # Generate direction vectors in camera frame
@@ -51,10 +54,16 @@ def _img2dirVecsCam(output_shape, hfov_degs):
     X = (x_grid - cx) / focal_length
     Y = (y_grid - cy) / focal_length
     Z = np.ones_like(X)
-    # norm = np.sqrt(X**2 + Y**2 + Z**2)
-    # X /= norm; Y /= norm; Z /= norm
-    return np.stack((X, Y, Z), axis=-1)  # (H, W, 3)
-
+    if not pyramidProj:
+        norm = np.sqrt(X**2 + Y**2 + Z**2)
+        X /= norm; Y /= norm; Z /= norm
+    dirs = np.stack((X, Y, Z), axis=-1)  # (H, W, 3)
+    # Rotate direction vectors into NWU frame
+    dirs_nwu = dirs @ p.getCAM2NWU().T
+    # Scale by depth and altitude
+    D2 = D * scale_factor
+    pc1 = dirs_nwu * (D2[..., np.newaxis])
+    return pc1, dirs_nwu
 
 def transform_depth(depth_image, bg_image, gep_image):
     assert depth_image.dtype == np.float32 and bg_image.dtype == np.float32 and \
@@ -74,40 +83,6 @@ def arg_max_2d(arr):
     am = np.argmax(arr)
     w = arr.shape[1]
     return (int(np.floor(am / w)), (am + 1) % w - 1)
-
-
-
-
-
-
-# def img2dirVecsCam(output_shape, hfov_degs):
-#     H, W = output_shape
-#     aspect_ratio = H / W
-#     # Horizontal FOV in radians
-#     hfov_rad = np.deg2rad(hfov_degs)
-#     # Vertical FOV based on aspect ratio
-#     vfov_rad = 2 * np.arctan(np.tan(hfov_rad / 2) * aspect_ratio)
-#     # Generate angles for each pixel
-#     x_angles = np.linspace(-hfov_rad / 2, hfov_rad / 2, W)
-#     y_angles = np.linspace(-vfov_rad / 2, vfov_rad / 2, H)
-#     # Create meshgrid of angles
-#     theta, phi = np.meshgrid(x_angles, y_angles)
-#     # Compute direction vectors in camera frame
-#     # Assuming forward is Z, right is X, down is Y (OpenCV style)
-#     # For each pixel, the ray direction in 3D is computed from angles:
-#     # x = tan(theta), y = tan(phi), z = 1, then normalize
-#     x = np.sin(theta)
-#     y = np.sin(phi)
-#     # z = np.ones_like(x)
-#     z = np.sqrt(1-x**2-y**2)
-#     # Stack and normalize the vectors
-#     dirs1 = np.stack((x, y, z), axis=-1)
-#     norms = np.linalg.norm(dirs1, axis=-1, keepdims=True)
-#     return dirs1 / norms  # shape (H, W, 3)
-
-
-
-
 
 def unified_scale(foreground: np.ndarray, background: np.ndarray):
     min_fg = np.min(foreground)
@@ -148,6 +123,25 @@ def interp_2d(metric_depth, mask, plot=False):
         plt.tight_layout()
         plt.show()
     return zi
+
+def resize_keep_ar(img, desired_width):
+    """
+    Resize an image to a desired width while preserving aspect ratio (AR).
+    
+    Args:
+        img (np.ndarray): Input image (OpenCV format).
+        desired_width (int): Desired width in pixels.
+        
+    Returns:
+        np.ndarray: Resized image with preserved AR.
+    """
+    h, w = img.shape[:2]
+    aspect_ratio = h / w
+    new_height = int(desired_width * aspect_ratio)
+    resized = cv2.resize(img, (desired_width, new_height), interpolation=cv2.INTER_AREA)
+    return resized
+
+
 
 # def project3DAndScale2(depth_img, pose, hfov_deg, shape):
 #     pc, dirs = depthImage2pointCloud(depth_img, roll_rad=pose._roll_rad, 

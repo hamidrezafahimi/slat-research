@@ -120,17 +120,7 @@ class Optimizer:
         self.noisy = False
         if not _ctrl is None:
             assert not _scorer is None and not _alpha is None
-            self.ctrl = _ctrl
-            self.W, self.H = infer_grid(self.ctrl)
-            self.N = _ctrl.shape[0]
-            self.scorer = _scorer
-            self.lr = _alpha
-            print("LR is : ----> ", self.lr)
-            self._score_window = collections.deque(maxlen=self.config.tunning_window)
-            self._big_window_len = 10 * self.config.tunning_window
-            self._score_window_big = collections.deque(maxlen=self._big_window_len)
-            self.avgChangeTolBig = self.config.tunning_avgChangeTol * 10
-            self.badLR = 1e6
+            self.initTune(_ctrl, _scorer, _alpha)
 
     def resetConfirmUpdate(self):
         self.prevScore = None
@@ -166,9 +156,8 @@ class Optimizer:
             self.prevCtrl = self.ctrl.copy()
             self.ctrl = ctrl.copy()
             return True
-
-    # ---- Headless run loop (FAST). --move_all toggles behavior here ONLY. ----
-    def tune(self, initial_guess, scorer, iters, alpha):
+        
+    def initTune(self, initial_guess, scorer, alpha):
         self.lr = alpha
         print("LR is : ----> ", self.lr)
         self.ctrl = initial_guess.copy()
@@ -178,14 +167,27 @@ class Optimizer:
         self._score_window = collections.deque(maxlen=self.config.tunning_window)
         self._big_window_len = 10 * self.config.tunning_window
         self._score_window_big = collections.deque(maxlen=self._big_window_len)
+        self._ctrl_hist = collections.deque(maxlen=10)
         self.avgChangeTolBig = self.config.tunning_avgChangeTol * 10
         self.resetConfirmUpdate()
         self.badLR = 1e6
         self.it = -1
+
+
+    # ---- Headless run loop (FAST). --move_all toggles behavior here ONLY. ----
+    def tune(self, initial_guess, scorer, iters, alpha):
+        self.initTune(initial_guess, scorer, alpha)
         while self.it < iters:
             self.it += 1
-            if self.ctrl is not None:
+            if self.ctrl is None:
+                ctrl = next(
+                    (x for x in reversed(self._ctrl_hist)
+                    if x is not None and not (isinstance(x, float) and np.isnan(x)) and not (isinstance(x, np.ndarray) and np.isnan(x).any())),
+                    None
+                )
+            else:
                 ctrl = self.ctrl.copy()
+                self._ctrl_hist.append(self.ctrl)
             for i in range(self.N):
                 dJdZ = self.central_diff_grad(i)
                 step = self.lr * dJdZ
@@ -205,11 +207,11 @@ class Optimizer:
             if self.config.verbosity == "tiny":
                 if var is not None:
                     if var_big is None:
-                        text = f"internal opt it: {self.it} - sc: {score:.2f} - noisy: {self.noisy} - lr: {self.lr:.5f} - var: {var:.5f}"
+                        text = f"internal opt it: {self.it} - sc: {score:.2f} - noisy: {self.noisy} - lr: {self.lr:.6f} - var: {var:.5f}"
                     else:
-                        text = f"internal opt it: {self.it} - sc: {score:.2f} - noisy: {self.noisy} - lr: {self.lr:.5f} - var: {var:.5f} - var_big: {var_big:.4f}"
+                        text = f"internal opt it: {self.it} - sc: {score:.2f} - noisy: {self.noisy} - lr: {self.lr:.6f} - var: {var:.5f} - var_big: {var_big:.4f}"
                 else:
-                    text = f"internal opt it: {self.it} - sc: {score:.2f} - noisy: {self.noisy} - lr: {self.lr:.5f}"
+                    text = f"internal opt it: {self.it} - sc: {score:.2f} - noisy: {self.noisy} - lr: {self.lr:.6f}"
 
             if r:        
                 print(text)

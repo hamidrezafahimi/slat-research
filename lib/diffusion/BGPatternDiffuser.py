@@ -6,7 +6,7 @@ dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(dir_path + "/../../lib")
 from geom.surfaces import cg_centeric_xy_spline, bspline_surface_mesh_from_ctrl, \
     project_external_along_normals_noreject
-from projection.helper import project3DAndScale
+from projection.helper import project3D
 from utils.typeConversion import pcm2pcd, pcd2pcdArr, pcdArr2pcd
 # from utils.o3dviz import visualize_spline_mesh
 from .tunning import Optimizer
@@ -17,7 +17,8 @@ from .helper import downsample_pcd, RandomSurfacer, compute_shifted_ctrl_points,
 from utils.o3dviz import visualize_spline_mesh
 import time
 from kinematics.clouds import orient_point_cloud_cgplane_global, apply_transform_points
-from utils.io import save_grid_with_Tinv, save_pcd
+from utils.io import save_pcd
+from projection.config import Scaling
 
 class BGPatternDiffuser:
     def __init__(self, config: BGPatternDiffuserConfig):
@@ -60,7 +61,7 @@ class BGPatternDiffuser:
     def diffuse(self, metric_depth, color_image, p, idx):
         print(f" =============== [BGPatternDiffuser] Diffusing on index {idx}")
         t0 = time.time()
-        rd_pcm, _ = project3DAndScale(metric_depth, p, self.config.hfov_deg)
+        rd_pcm, _ = project3D(metric_depth, p, self.config.hfov_deg, move=False, scaling=Scaling.NULL)
         rd_pcd = pcm2pcd(rd_pcm, color_image)
         if self.config.downsample_dstNum != 1.0:
             rd_pcd = downsample_pcd(rd_pcd, self.config.downsample_dstNum)
@@ -120,17 +121,24 @@ class BGPatternDiffuser:
 
         # ================== Fine-Tune the Back-Ground Model
         print(f"[BGPatternDiffuser] ------- Start fine tunning on index {idx}")
-        self.scorer.reset(rd_pcd_arr.copy(), smoothness_base_mesh=nonshifted_mesh, max_dz=10*sh, 
+        self.scorer.reset(rd_pcd_arr.copy(), smoothness_base_mesh=nonshifted_mesh, max_dz=sh, 
                           fine_tune=True, original_colors=rd_pcd.colors)
         fine_tunned_z = self.tunner.tune(upsampled_ctrl, self.scorer,
                                                iters=self.config.finetune_iters,
                                                alpha=self.config.tunning_alpha)
         fine_tunned = upsampled_ctrl.copy()
         fine_tunned[:,2] = fine_tunned_z
+
         fmesh = bspline_surface_mesh_from_ctrl(fine_tunned, self.config.finetune_grid_w, 
                                         self.config.finetune_grid_h, 
                                         self.config.spline_mesh_samples_u, 
                                         self.config.spline_mesh_samples_v)
+        
+        # _, _, _, fmesh = \
+        #     compute_shifted_ctrl_points(rd_pcd_arr.copy(), fine_tunned, 
+        #                                 self.config.spline_mesh_samples_u,
+        #                                 self.config.spline_mesh_samples_v, 1.0)
+        
         if self.config.viz: # Post-fine-tune viz
             ctrl_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fine_tunned))
             ctrl_pcd.paint_uniform_color([1.0, 0.2, 0.2])

@@ -10,7 +10,7 @@ import open3d as o3d
 
 import random
 from types import SimpleNamespace
-from scipy.interpolate import CubicSpline
+from scipy.interpolate import CubicSpline, LinearNDInterpolator
 from scipy.spatial import cKDTree
 _HAS_SCIPY = True
 
@@ -1375,7 +1375,7 @@ def calc_ground_depth(hfov_degs,
     depth_img     = np.minimum(depth_img, 255.0)                # clamp just in case
     return depth_img
 
-def unfold_depth(dpc, bpcd, gpc):
+def ndfDrop_depth(dpc, bpcd, gpc):
     dpc_pcd = pcm2pcd(dpc)
     # bpc_pcd = pcm2pcd(bpc)
     bpc_pcd = bpcd
@@ -1391,7 +1391,7 @@ def unfold_depth(dpc, bpcd, gpc):
     dist = euclidean_distance_map(dpc, proj_b)
     unfolded_dpc = proj_g.copy()
     unfolded_dpc[:, :, 2:3] += dist
-    return unfolded_dpc
+    return unfolded_dpc, proj_g[:,:,2]
 
 def calc_dist2bottom(pc_up: np.ndarray, pc_down: np.ndarray) -> np.ndarray:
     H, W, _ = pc_up.shape
@@ -1422,125 +1422,6 @@ def drop_depth(dpc, bpc, gpc):
     dropped_dpc[:,:,2] -= diff
     return dropped_dpc
 
-
-def ndfDrop_depth(dpc, bpc, gpc):
-    print("ndfDrop_depth")
-
-    nan_indices = np.argwhere(np.isnan(bpc).any(axis=2))
-    print("Indices of points with NaN -> bpc: ", len(nan_indices))
-    dpc_pcd = pcm2pcd(dpc)
-    bpc_pcd = pcm2pcd(bpc)
-    gpc_pcd = pcm2pcd(gpc)
-
-    if len(bpc_pcd.points) == 0:
-        raise ValueError("bpc_pcd is empty, cannot proceed.")
-    
-    bpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
-    bpc_pcd = bpc_pcd.voxel_down_sample(0.02)
-    gpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
-    gpc_pcd = gpc_pcd.voxel_down_sample(0.02)
-    
-
-    # # Sample --------------------------------------------------------------
-    # index_h = 6
-    # index_w = 36
-
-    # point_dpc = dpc[index_h:index_h+1, index_w:index_w+1, :]
-
-    # point_b = project_points_multi_fast(bpc_pcd, point_dpc, k=8, just_proj=True)
-    # point_g_ = project_points_multi_fast(gpc_pcd, point_b, k=8, just_proj=True)
-    
-    # proj_g, _ = unfold_surface(bpc, hfov_deg=80.0)
-
-    # print ("index d in bpc", map_pc_proj_to_index(point_dpc, bpc))
-    # print ("index d in gpc", map_pc_proj_to_index(point_dpc, gpc))
-    # print ("index b in bpc", map_pc_proj_to_index(point_b, bpc))
-    # # exit()
-    # index_h = 71
-    # index_w = 38
-    # point_g = proj_g[index_h:index_h+1, index_w:index_w+1, :]
-    # # point_bpc = bpc[index_h:index_h+1, index_w:index_w+1, :]
-
-    # # Flatten to (3,)
-    # pa = point_dpc.reshape(3)
-    # pb = point_b.reshape(3)
-    # pg = point_g_.reshape(3)
-    # pbp = point_g.reshape(3)
-
-    # # Stack into Nx3 array
-    # points = np.vstack([pa, pb, pg, pbp])
-
-    # # Create LineSet
-    # lines = [[0, 1], [1, 2], [1, 3]]  # a->b, b->g
-    # colors = [[1, 0, 0], [0, 1, 0], [0, 1, 1]]  # red for a->b, green for b->g
-
-    # line_set = o3d.geometry.LineSet()
-    # line_set.points = o3d.utility.Vector3dVector(points)
-    # line_set.lines = o3d.utility.Vector2iVector(lines)
-    # line_set.colors = o3d.utility.Vector3dVector(colors)
-
-    # spheres = []
-    # sphere_colors = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [0, 0, 0]]
-    # radii = [0.05, 0.05, 0.05, 0.1]
-
-    # for pt, col, r in zip(points, sphere_colors, radii):
-    #     sphere = o3d.geometry.TriangleMesh.create_sphere(radius=r)
-    #     sphere.translate(pt)
-    #     sphere.paint_uniform_color(col)
-    #     spheres.append(sphere)
-
-    # # Visualize
-    
-    # sss = pcm2pcd(proj_g)
-    # o3d.visualization.draw_geometries([line_set, bpc_pcd, dpc_pcd, sss, *spheres])
-
-    # exit()
-    # # --------------------------------------------------------------
-
-
-    proj_b = project_points_multi_fast(bpc_pcd, dpc, k=8, just_proj=True)
-    print("unfold_surface")
-    proj_g, _ = unfold_surface(bpc, hfov_deg=80.0)
-    g_pcd = pcm2pcd(proj_g)
-
-    proj_b_idx = map_pc_proj_to_index(proj_b, bpc) # H * W * 2
-    proj_b_idx_i = np.int32(proj_b_idx)
-    dist = euclidean_distance_map(dpc, proj_b)     # H * W * 1
-    print(proj_b_idx_i[10:20, 10:20, :])
-    
-    print("proj_g: ", proj_g.shape)
-    print("dist: ", dist.shape)
-    print("proj_b_idx: ", proj_b_idx.shape)
-
-
-    unfolded_dpc = np.zeros_like(proj_g)
-    for i in range(dpc.shape[0]):
-        for j in range(dpc.shape[1]):
-            unfolded_dpc[i, j, 0] = proj_g[proj_b_idx_i[i,j,0], proj_b_idx_i[i,j,1], 0]
-            unfolded_dpc[i, j, 1] = proj_g[proj_b_idx_i[i,j,0], proj_b_idx_i[i,j,1], 1]
-            unfolded_dpc[i, j, 2] = proj_g[proj_b_idx_i[i,j,0], proj_b_idx_i[i,j,1], 2] + dist[i,j,0]
-    
-
-    nan_indices = np.argwhere(np.isnan(unfolded_dpc).any(axis=2))
-    print("Indices of points with NaN -> unfolded_dpc: ", len(nan_indices))
-
-    pc1 = pcm2pcd(unfolded_dpc)
-    unfolded_dpc_1 = unfolded_dpc.copy()
-    proj_g = project_points_multi_fast(gpc_pcd, proj_b, k=8, just_proj=True)
-    unfolded_dpc = proj_g.copy()                          # H * W * 3
-    unfolded_dpc[:, :, 2:3] += dist
-    pc2 = pcm2pcd(unfolded_dpc)
-
-    # Paint point clouds
-    pc1.paint_uniform_color([0, 1, 0])  # green
-    pc2.paint_uniform_color([1, 0, 0])  # red
-    dpc_pcd.paint_uniform_color([0, 0, 1])
-    g_pcd.paint_uniform_color([0, 0, 0])
-    # Visualize
-    o3d.visualization.draw_geometries([pc1, pc2, dpc_pcd])
-    o3d.visualization.draw_geometries([bpc_pcd, g_pcd, dpc_pcd])
-    return unfolded_dpc
-
 def rescale_depth(depth_image, bg_image, pitch):
     gep_f = calc_ground_depth(66.0, Pose, output_shape=depth_image.shape)
     # Convert to float32
@@ -1566,3 +1447,75 @@ def rescale_depth(depth_image, bg_image, pitch):
     if np.min(final_f) < 0 or np.max(final_f) > 255.0:
         raise ValueError("Non-logical ratio calculation")
     return final_f, gep_f
+
+def unfold_depth(dpc, bpc, gpc):
+    nan_indices = np.argwhere(np.isnan(bpc).any(axis=2))
+    dpc_pcd = pcm2pcd(dpc)
+    bpc_pcd = pcm2pcd(bpc)
+    gpc_pcd = pcm2pcd(gpc)
+    if len(bpc_pcd.points) == 0:
+        raise ValueError("bpc_pcd is empty, cannot proceed.")
+    bpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+    bpc_pcd = bpc_pcd.voxel_down_sample(0.02)
+    gpc_pcd.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamKNN(knn=30))
+    gpc_pcd = gpc_pcd.voxel_down_sample(0.02)
+    proj_b = project_points_multi_fast(bpc_pcd, dpc, k=8, just_proj=True)
+    proj_g, _ = unfold_surface(bpc, hfov_deg=80.0)
+    proj_b_idx = map_pc_proj_to_index(proj_b, bpc) # H * W * 2
+    proj_b_idx_i = np.int32(proj_b_idx)
+    dist = euclidean_distance_map(dpc, proj_b)     # H * W * 1
+    unfolded_dpc = np.zeros_like(proj_g)
+    for i in range(dpc.shape[0]):
+        for j in range(dpc.shape[1]):
+            unfolded_dpc[i, j, 0] = proj_g[proj_b_idx_i[i,j,0], proj_b_idx_i[i,j,1], 0]
+            unfolded_dpc[i, j, 1] = proj_g[proj_b_idx_i[i,j,0], proj_b_idx_i[i,j,1], 1]
+    nan_indices = np.argwhere(np.isnan(unfolded_dpc).any(axis=2))
+    return unfolded_dpc
+
+def map_pc_proj_to_index(pc_proj: np.ndarray, pc: np.ndarray, k: int = 3) -> np.ndarray:
+    nan_val = 1e9  # large number to replace invalid points
+    
+    H_pc, W_pc, _ = pc.shape
+    H_proj, W_proj, _ = pc_proj.shape
+
+    # Replace NaNs/Infs in pc with large number
+    pc_safe = np.where(np.isfinite(pc), pc, nan_val)
+
+    # Flatten pc
+    pc_flat = pc_safe.reshape(-1, 3)
+    
+    # Create grid coordinates
+    h_coords, w_coords = np.meshgrid(np.arange(H_pc), np.arange(W_pc), indexing='ij')
+    coords_flat = np.stack([h_coords, w_coords], axis=-1).reshape(-1, 2)
+
+    # Build KDTree on all points
+    tree = cKDTree(pc_flat)
+
+    # Flatten projected points
+    proj_flat = pc_proj.reshape(-1, 3)
+
+    # Handle invalid query points
+    valid_mask = np.isfinite(proj_flat).all(axis=1)
+    mapped_coords_flat = np.zeros((proj_flat.shape[0], 2), dtype=float)
+
+    if np.any(valid_mask):
+        # Query only valid points
+        dists, idxs = tree.query(proj_flat[valid_mask], k=k)
+        if k == 1:
+            dists = dists[:, None]
+            idxs = idxs[:, None]
+
+        # Inverse distance weighting
+        dists = np.maximum(dists, 1e-8)
+        weights = 1.0 / dists
+        weights /= np.sum(weights, axis=1, keepdims=True)
+
+        # Weighted average of indices
+        mapped_coords_flat[valid_mask] = np.sum(coords_flat[idxs] * weights[..., None], axis=1)
+
+    # Clip to valid range
+    mapped_coords_flat[:, 0] = np.clip(mapped_coords_flat[:, 0], 0, H_pc-1)
+    mapped_coords_flat[:, 1] = np.clip(mapped_coords_flat[:, 1], 0, W_pc-1)
+
+    # Reshape back to H_proj, W_proj
+    return mapped_coords_flat.reshape(H_proj, W_proj, 2)

@@ -32,8 +32,8 @@ class IOHandler:
         parser.add_argument("--dataset", required=True,
                             help="Path to the dataset directory (e.g., ../../data/e)")
         parser.add_argument("--do_fuse", action="store_true")
+        parser.add_argument("--show_bg", action="store_true")
         parser.add_argument("--start", type=int, help="Row index to start from")
-        
         self.args = parser.parse_args()
 
         # Resolve the dataset path relative to the current working directory
@@ -55,7 +55,8 @@ class IOHandler:
         self.rowslist = self.df.to_dict("records")
 
         bgdir = os.path.join(dataset_dir, "bgpat")
-        if read_mode and os.path.isdir(bgdir):
+        use_bg = self.args.show_bg or self.args.do_fuse
+        if read_mode and os.path.isdir(bgdir) and use_bg:
             self.bgDir = bgdir
         else:
             self.bgDir = None

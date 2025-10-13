@@ -1,32 +1,12 @@
-from enum import Enum, auto
 import threading
 import cv2
 import open3d as o3d
 import open3d.visualization.gui as gui
-from dataclasses import dataclass
 import numpy as np
 import matplotlib.pyplot as plt
 from .helper import *
-from geom.surfaces import bspline_surface_mesh_from_ctrl, infer_grid
 from utils.o3dviz import mat_mesh, fit_camera
-from diffusion.helper import downsample_pcd
-from kinematics.transformations import apply_transform_mesh
-from kinematics.mesh import translate_mesh
-
-class VisMode(Enum):
-    Null = auto()
-    MSingle = auto()
-    MAccum = auto()
-
-@dataclass
-class Mapper3DConfig:
-    hfov_deg: float
-    visMode: VisMode = VisMode.MAccum
-    shape: tuple = None
-    color_mode: str = 'constant'  # 'image' | 'proximity' | 'constant' | 'none'
-    mesh_u: int = 40
-    mesh_v: int = 40
-    downsample_dstW: int = 300
+from .config import *
 
 class Mapper3D:
     def __init__(self, config: Mapper3DConfig, fuser = None):
@@ -76,47 +56,52 @@ class Mapper3D:
             return True
         return False
 
-    def project(self, metric_depth, pose, cimg, bg=None):
+    def project(self, metric_depth, pose, cimg, bgpcd=None):
         """
         Projects the 3D point cloud based on the provided metric depth and pose, and shows the visualization.
         """
         # Generate the point cloud from metric depth and pose
-        fresh_pc, mc = project3DAndScale(metric_depth, pose, self.config.hfov_deg, move=True)
-
-        if bg is not None:
-            assert mc is not None
-            # mesh_ = bspline_surface_mesh_from_ctrl(bg.points_xyz, bg.grid_w, bg.grid_h, 
-            #                                        self.config.mesh_u, self.config.mesh_v)
-            # m = apply_transform_mesh(mesh_, T=bg.T_inv)
-            # mesh = translate_mesh(m, mc.T)
-            mesh = bg
-            mesh.points = o3d.utility.Vector3dVector(np.asarray(mesh.points) + mc)
-        else:
-            mesh = None
-        
         if self.fuser is None:
-            projected_pc = fresh_pc
+            # Projecting the raw depth, requires 'pyramid-projection'. The point cloud is translated
+            # as well as being projected
+            fresh_pc, mc = project3D(metric_depth, pose, self.config.hfov_deg, move=True,
+                                    pyramidProj=True, scaling=self.config.scaling)
         else:
-            assert mesh is not None
-            fresh_pc = self.downsample_pcm(fresh_pc, self.config.downsample_dstW)
-            projected_pc = self.fuser.fuse_flat_ground(pose, fresh_pc, mesh)
-            mesh = None
+            # Projecting to be fused later, requires 'spherical-projection'. The point cloud is not 
+            # translated yet
+            fresh_pc, mc = project3D(metric_depth, pose, self.config.hfov_deg, move=False, 
+                                    scaling=Scaling.NULL)
+
+        if bgpcd is not None and mc is not None:
+            # The case: When 'raw-depth-projection' with provided bg - then move bg as well as above
+            bgpcd.points = o3d.utility.Vector3dVector(np.asarray(bgpcd.points) + mc)
+        
+        projected_pc = self.downsample_pcm(fresh_pc, self.config.downsample_dstW)
+        cimg = resize_keep_ar(cimg, self.config.downsample_dstW)
+        if self.fuser is not None:
+            # Perform pattern fusion - the fuser scales the point cloud internally
+            assert bgpcd is not None
+            projected_pc = self.fuser.fuse_flat_ground(pose, projected_pc, bgpcd)
+            # Translate to current pose
+            projected_pc += np.array([[pose.p6.x], [pose.p6.y], [pose.p6.z]]).T
+            # No need to show the bg used for pattern fusion - the output is enough in viz
+            bgpcd = None
 
         with self.scene_lock:
             if self.config.visMode == VisMode.MSingle:
                 name = f"points_{self.it}"
-                mname = f"mesh_{self.it}"
+                mname = f"bgpcd_{self.it}"
                 self.scene.scene.remove_geometry(name)
                 self.scene.scene.remove_geometry(mname)
             elif self.config.visMode == VisMode.MAccum:
                 pass
             self.it += 1
             name = f"points_{self.it}"
-            mname = f"mesh_{self.it}"
+            mname = f"bgpcd_{self.it}"
             pcd = self.pcm2pcd(projected_pc, cimg)
             self.scene.scene.add_geometry(name, pcd, self._mat_points(5.0))
-            if mesh is not None:
-                self.scene.scene.add_geometry(mname, mesh, mat_mesh())
+            if bgpcd is not None:
+                self.scene.scene.add_geometry(mname, bgpcd, mat_mesh())
             fit_camera(self.scene.scene, [pcd])
 
     def pcm2pcd(self, pcm, visualization_image):

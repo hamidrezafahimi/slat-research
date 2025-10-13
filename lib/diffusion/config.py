@@ -13,7 +13,7 @@ class BGPatternDiffuserConfig:
     shift_k: float = 1.2
     finetune_grid_w: int = 7
     finetune_grid_h: int = 7
-    tunning_alpha: float = 0.0001
+    tunning_alpha: float = 1e-5
     fast: bool = False
     downsample_dstNum: int = 1e5
     scoring_downsample_frac: float = 0.1

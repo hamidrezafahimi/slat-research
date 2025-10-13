@@ -10,4 +10,4 @@ class FlatFusionMode(Enum):
 @dataclass
 class BGPatternFuserConfig:
     hfov_deg: float
-    flat_mode: FlatFusionMode = FlatFusionMode.Unfold
+    flat_mode: FlatFusionMode = FlatFusionMode.ndfDrop
