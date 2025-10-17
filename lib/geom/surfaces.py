@@ -1,4 +1,6 @@
 import numpy as np, open3d as o3d
+from .grids import infer_grid, reorder_ctrl_points_rowmajor
+from .clouds import calc_pcd_bbox
 
 def _extent_wh_center_xy(cloud_pts: np.ndarray):
     mins = cloud_pts[:, :2].min(axis=0); maxs = cloud_pts[:, :2].max(axis=0)
@@ -30,36 +32,6 @@ def _flat_patch_mesh(center_xy: np.ndarray, W: float, H: float, z0: float, su: i
     )
     mesh.compute_vertex_normals()
     return mesh
-
-# infer grid sizes (unique Xs and Ys with tolerance)
-def unique_sorted_with_tol(a, atol):
-    a_sorted = np.sort(a)
-    uniq = [a_sorted[0]]
-    for v in a_sorted[1:]:
-        if abs(v - uniq[-1]) > atol:
-            uniq.append(v)
-    return np.asarray(uniq, dtype=float)
-
-def infer_grid(ctrl_points,
-        tol: float = 0.59):
-    P = np.asarray(ctrl_points, dtype=float)
-    if P.ndim != 2 or P.shape[1] != 3 or P.size == 0:
-        raise ValueError("ctrl_points must be a non-empty (N,3) array")
-    xs, ys = P[:, 0], P[:, 1]
-
-    # extents
-    W = float(xs.max() - xs.min())
-    H = float(ys.max() - ys.min())
-
-    tol_x = max(tol, 1e-8 * max(1.0, W))
-    tol_y = max(tol, 1e-8 * max(1.0, H))
-    ux = unique_sorted_with_tol(xs, tol_x)  # gw
-    uy = unique_sorted_with_tol(ys, tol_y)  # gh
-    gw, gh = len(ux), len(uy)
-    if gw * gh != len(P):
-        raise ValueError(f"Control net is not a full grid: {len(P)} pts vs {gw}×{gh}")
-    return gw, gh
-
 
 def generate_spline(ctrl_points: np.ndarray,
                        samples_u: int = 40, samples_v: int = 40):
@@ -494,3 +466,74 @@ def nearest_vertex_normals(query_pts: np.ndarray, mesh: o3d.geometry.TriangleMes
     n = n / lens
     return n
 
+def filter_mesh_neighbors(
+    ext_pts: np.ndarray,
+    ctrl_pts: np.ndarray,
+    su: int = 100,
+    sv: int = 100,
+    up_offset: float = 0.5,
+    down_offset: float = 0.3,
+) -> np.ndarray:
+    """
+    Filter external points by their normal-to-mesh distance, using asymmetric thresholds.
+
+    Above points (ext_z > proj_z): keep if ||ext - proj|| < up_offset * shft
+    Below points (ext_z <= proj_z): keep if ||ext - proj|| < down_offset
+    where shft = max normal distance among 'below' points.
+
+    Returns
+    -------
+    filtered_pts : (K,3) float array
+        Points that passed the filter (subset of ext_pts, preserving original order).
+    """
+    # --- sanitize inputs ---
+    ext = np.asarray(ext_pts, dtype=float)
+    if ext.ndim != 2 or ext.shape[1] < 3:
+        raise ValueError("ext_pts must be (N,>=3).")
+    ext = ext[:, :3]
+
+    ctrl = np.asarray(ctrl_pts, dtype=float)
+    if ctrl.ndim == 1:
+        if ctrl.size < 3:
+            raise ValueError("ctrl_pts row must have at least 3 values (x,y,z).")
+        ctrl = ctrl[None, :]
+    if ctrl.shape[1] < 3:
+        raise ValueError("ctrl_pts must have at least 3 columns (x,y,z).")
+    ctrl = ctrl[:, :3]
+
+    # --- build surface mesh used for projection ---
+    gw, gh = infer_grid(ctrl)
+    ctrl_rowmajor = reorder_ctrl_points_rowmajor(ctrl)
+    mesh = bspline_surface_mesh_from_ctrl(ctrl_rowmajor, gw, gh, su, sv)
+    mesh.compute_vertex_normals()
+
+    # --- project and classify ---
+    proj = project_external_along_normals_noreject(ext, mesh)
+    dz = ext[:, 2] - proj[:, 2]
+    eps = 1e-12
+    below_mask = dz <= eps
+
+    # --- disp from 'below' distances (max) ---
+    if np.any(below_mask):
+        diffs_below = ext[below_mask] - proj[below_mask]
+        shft = float(np.linalg.norm(diffs_below, axis=1).max(initial=0.0))
+    else:
+        shft = 0.0
+
+    # --- distances and thresholds ---
+    diffs_all = ext - proj
+    lens_all = np.linalg.norm(diffs_all, axis=1)
+    above_mask = dz > eps
+
+    minp, maxp = calc_pcd_bbox(ext)
+    limdiffz = 0.01 * abs(minp[2] - maxp[2])
+
+    thr_above = max(up_offset * shft, limdiffz)
+    thr_below = max(down_offset * shft, limdiffz)
+    print(f"[filter_mesh_neighbors] Shift val: {shft:.3f}, limdiffz: {limdiffz:.3f}, thr_above: {thr_above:.3f}, thr_below: {thr_below:.3f}")
+
+    keep_above = above_mask & (lens_all < thr_above)
+    keep_below = (~above_mask) & (lens_all < thr_below)
+    keep = keep_above | keep_below
+
+    return ext[keep], keep

@@ -43,6 +43,9 @@ def visualize_spline_mesh(ctrl_pcd, surf_mesh, ext_pcd, name, proj_pcd=None):
     scene.scene = rendering.Open3DScene(window.renderer)
     window.add_child(scene)
 
+    # vis = o3d.visualization.Visualizer()
+    # vis.create_window(window_name=name, width=1440, height=900)
+
     if ctrl_pcd is not None:
         scene.scene.add_geometry("ctrl_pcd", ctrl_pcd, mat_points(8.0))
     if surf_mesh is not None:
@@ -60,7 +63,8 @@ def visualize_spline_mesh(ctrl_pcd, surf_mesh, ext_pcd, name, proj_pcd=None):
     else:
         fit_camera(scene.scene, [ctrl_pcd, surf_mesh, ext_pcd, proj_pcd, axis])
     gui.Application.instance.run()
-
+    # vis.run()
+    # vis.destroy_window()
 
 def make_lineset_for_pairs(src_pts: np.ndarray, dst_pts: np.ndarray, color=(1.0, 0.0, 1.0)) -> o3d.geometry.LineSet:
     """Build a LineSet connecting each src point to its corresponding dst point."""

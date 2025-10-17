@@ -1,23 +1,7 @@
 import open3d as o3d
 from .transformations import rodrigues_rotation_matrix
 import numpy as np
-
-def estimate_plane_normal_cg_global(pcd: o3d.geometry.PointCloud) -> (np.ndarray, np.ndarray):
-    """
-    Estimate a plane that is constrained to pass through the centroid (CG)
-    using ALL points. The plane normal is the smallest-eigenvector of the
-    covariance of (points - CG).
-    Returns (normal, centroid).
-    """
-    pts = np.asarray(pcd.points)
-    if pts.shape[0] < 3:
-        raise RuntimeError("Not enough points to estimate a plane.")
-    cg = pcd.get_center()
-    X = pts - cg
-    cov = np.cov(X.T)
-    eigvals, eigvecs = np.linalg.eigh(cov)
-    normal = eigvecs[:, np.argmin(eigvals)]
-    return normal, cg
+from geom.clouds import estimate_plane_normal_cg_global
 
 def orient_point_cloud_cgplane_global(pcd: o3d.geometry.PointCloud):
     """
@@ -45,7 +29,6 @@ def apply_transform(pcd: o3d.geometry.PointCloud, T: np.ndarray) -> o3d.geometry
     q.rotate(R, center=(0.0, 0.0, 0.0))
     q.translate(t, relative=True)
     return q
-
 
 def apply_transform_points(points: np.ndarray, T: np.ndarray) -> np.ndarray:
     """

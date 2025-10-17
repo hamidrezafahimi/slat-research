@@ -19,6 +19,7 @@ import time
 from kinematics.clouds import orient_point_cloud_cgplane_global, apply_transform_points
 from utils.io import save_pcd
 from projection.config import Scaling
+from geom.surfaces import filter_mesh_neighbors
 
 class BGPatternDiffuser:
     def __init__(self, config: BGPatternDiffuserConfig):
@@ -62,16 +63,17 @@ class BGPatternDiffuser:
         print(f" =============== [BGPatternDiffuser] Diffusing on index {idx}")
         t0 = time.time()
         rd_pcm, _ = project3D(metric_depth, p, self.config.hfov_deg, move=False, scaling=Scaling.NULL)
-        rd_pcd = pcm2pcd(rd_pcm, color_image)
+        rd_pcd_ = pcm2pcd(rd_pcm, color_image)
         if self.config.downsample_dstNum != 1.0:
-            rd_pcd = downsample_pcd(rd_pcd, self.config.downsample_dstNum)
+            rd_pcd_ = downsample_pcd(rd_pcd_, self.config.downsample_dstNum)
         
-        rd_pcd, T = orient_point_cloud_cgplane_global(rd_pcd)
+        rd_pcd, T = orient_point_cloud_cgplane_global(rd_pcd_)
         rd_pcd_arr = pcd2pcdArr(rd_pcd)
 
         # -------------- Provide initial guess if does not exist
         if self.scoring_base_mesh is None:
             self.scoring_base_mesh, self.guess1 = self.initialCoarseTune(rd_pcd_arr.copy(), rd_pcd)
+
         # ================== Coarse-Tune the Back-Ground Model
         print(f"[BGPatternDiffuser] ------- Start Iterative coarse tunning on index {idx}")
         if self.config.viz: # Pre-coarse-tune viz
@@ -98,12 +100,11 @@ class BGPatternDiffuser:
                                                                 self.config.coarsetune_grid_h,
                                                                 self.config.spline_mesh_samples_u, 
                                                                 self.config.spline_mesh_samples_v)
-
         print(f"[BGPatternDiffuser] ------- Iterative Coarse tunning done on index {idx}")
+
         # ================= Prepare for Fine-Tunning
-        _, nonshifted_mesh, sh, shifted_mesh = compute_shifted_ctrl_points(rd_pcd_arr.copy(), coarse_tunned, 
-                                                self.config.spline_mesh_samples_u,
-                                                self.config.spline_mesh_samples_v, 1.0)
+        _, nonshifted_mesh, sh, shifted_mesh = compute_shifted_ctrl_points(rd_pcd_arr.copy(), 
+            coarse_tunned, self.config.spline_mesh_samples_u, self.config.spline_mesh_samples_v, 1.0)
         if self.config.viz: # Post-coarse-tune viz
             ctrl_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(coarse_tunned))
             ctrl_pcd.paint_uniform_color([1.0, 0.2, 0.2])
@@ -119,7 +120,7 @@ class BGPatternDiffuser:
             ctrl_pcd.paint_uniform_color([1.0, 0.2, 0.2])
             visualize_spline_mesh(ctrl_pcd, nonshifted_mesh, rd_pcd, name="pre fine tune model")
 
-        # ================== Fine-Tune the Back-Ground Model
+        # # ================== Fine-Tune the Back-Ground Model
         print(f"[BGPatternDiffuser] ------- Start fine tunning on index {idx}")
         self.scorer.reset(rd_pcd_arr.copy(), smoothness_base_mesh=nonshifted_mesh, max_dz=sh, 
                           fine_tune=True, original_colors=rd_pcd.colors)
@@ -139,24 +140,37 @@ class BGPatternDiffuser:
         #                                 self.config.spline_mesh_samples_u,
         #                                 self.config.spline_mesh_samples_v, 1.0)
         
+        fil, bgmask = filter_mesh_neighbors(rd_pcd_arr, fine_tunned, self.config.spline_mesh_samples_u,
+                                            self.config.spline_mesh_samples_v, 0.5, 1.2)
+        fil_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fil))
+        fil_pcd.paint_uniform_color([1.0, 0, 0])
         if self.config.viz: # Post-fine-tune viz
             ctrl_pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(fine_tunned))
             ctrl_pcd.paint_uniform_color([1.0, 0.2, 0.2])
             visualize_spline_mesh(ctrl_pcd, fmesh, 
                                   pcdArr2pcd(self.scorer.cloud_pts, self.scorer.original_colors), 
-                                  name="post fine tune model with scored point cloud")
-        
+                                  name="post fine tune model with scored point cloud",
+                                  proj_pcd=fil_pcd)
+
         R = T[:3, :3]; t = T[:3, 3]
         T_inv = np.eye(4)
         T_inv[:3, :3] = R.T
         T_inv[:3, 3]  = -R.T @ t
-        # filename = f"bg_{idx}.json"
-        filename = f"bg_{idx}.pcd"
-        outname = os.path.join(self.config.output_dir, filename)
-        # np.savetxt(outname, restored, delimiter=',')
         bgpts = project_external_along_normals_noreject(rd_pcd_arr, fmesh)
+        filename1 = f"_{idx}.pcd"
+        filename = f"bg_{idx}.pcd"
+        outname1 = os.path.join(self.config.output_dir, filename1)
+        outname = os.path.join(self.config.output_dir, filename)
+        # Debug data log:
+        # filename2 = f"ctrl_{idx}.csv"
+        # outname2 = os.path.join(self.config.output_dir, filename2)
+        # save_pcd(bgpts, np.zeros_like(np.asarray(rd_pcd.colors)), outname)
+        # save_pcd(np.asarray(rd_pcd.points), np.asarray(rd_pcd_.colors), outname1)
+        # np.savetxt(outname2, fine_tunned, delimiter=',')
+        # Main data log:
         restored = apply_transform_points(bgpts, T_inv)
-        save_pcd(restored, np.zeros_like(np.asarray(rd_pcd.colors)), outname)
-        # save_grid_with_Tinv(outname, fine_tunned, self.config.finetune_grid_w, 
-        #                     self.config.finetune_grid_h, T_inv)
+        bg_pts = restored[bgmask]
+        save_pcd(restored, np.zeros_like(np.asarray(rd_pcd_.colors)), outname)
+        # save_pcd(bg_pts, np.zeros_like(np.asarray(rd_pcd_.colors)), outname)
+        save_pcd(np.asarray(rd_pcd_.points), np.asarray(rd_pcd_.colors), outname1)
         print(f"[BGPatternDiffuser] Fine tunning done on index {idx}, data written to {outname}. Time: {(time.time() - t0):.2f} sec")

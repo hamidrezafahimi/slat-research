@@ -6,7 +6,8 @@ import sys
 dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(dir_path + "/..")
 from geom.surfaces import bspline_surface_mesh_from_ctrl, project_external_along_normals_noreject,\
-    infer_grid, cg_centeric_xy_spline
+    cg_centeric_xy_spline
+from geom.grids import infer_grid, reorder_ctrl_points_rowmajor
 from utils.o3dviz import mat_points, mat_mesh, mat_mesh_tinted
 import open3d.visualization.rendering as rendering
 
@@ -151,22 +152,7 @@ def compute_shifted_ctrl_points(
     ctrl_pts: np.ndarray,
     su: int = 100,
     sv: int = 100,
-    k: float = 1.1,
-):
-    """
-    Load a point cloud and control points CSV, project external points to the B-spline
-    surface, compute the longest 'below' distance (disp), and return shifted control
-    points (original ctrl points with their z lowered by disp), together with
-    useful metadata so the caller can build meshes / visualize.
-
-    Returns:
-      shifted_ctrl_pts: (N,3) numpy array -- original control points with z -= disp
-      ctrl_pts_rowmajor: (N,3) numpy array -- row-major reordered control points (useful for mesh builder)
-      gw, gh: inferred grid width/height (ints)
-      disp: float (the longest 'below' distance)
-      shft: float (K * disp)  # the mesh translation actually applied in original script
-      ext_pts: (M,3) numpy array of loaded (optionally downsampled) point cloud points
-    """
+    k: float = 1.1):
     # --- Load control points ---
     ctrl_pts_orig = ctrl_pts.copy()
     if ctrl_pts.ndim == 1:
@@ -227,12 +213,6 @@ def compute_shifted_ctrl_points(
 
     mesh_shifted.paint_uniform_color([0.90, 0.30, 0.40])  # shifted spline (distinct color)
     return shifted_ctrl_pts, mesh, shft, mesh_shifted
-
-def reorder_ctrl_points_rowmajor(ctrl_pts: np.ndarray) -> np.ndarray:
-    """Reorder control points to row-major by Y (rows) then X (cols)."""
-    xs, ys = ctrl_pts[:, 0], ctrl_pts[:, 1]
-    order = np.lexsort((xs, ys))  # primary: y, secondary: x
-    return ctrl_pts[order]
 
 def create_grid_on_surface(mesh, samples_u, samples_v):
     # Get the mesh vertices and make a grid of points based on the surface

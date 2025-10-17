@@ -54,19 +54,6 @@ def normalize01(x: np.ndarray) -> np.ndarray:
         return np.zeros_like(x)
     return (x - mn) / rng
 
-def calc_pcd_bbox(points: np.ndarray):
-    """Axis-aligned bounding box (min, max)."""
-    pts = np.asarray(points, dtype=float)
-    return pts.min(axis=0), pts.max(axis=0)
-
-def average_density(points: np.ndarray) -> float:
-    """Points per unit volume using AABB volume (robust to degenerate dims)."""
-    mn, mx = calc_pcd_bbox(points)
-    extents = np.maximum(mx - mn, _eps())
-    vol = float(np.prod(extents))
-    n = points.shape[0]
-    return n / vol
-
 def adapt_radius_for_avg_neighbors(points: np.ndarray, K: int) -> float:
     """
     Pick radius R so a random ball contains ~K points on average, based on global density.
@@ -105,12 +92,6 @@ def ndf_to_score(ndf_dists: np.ndarray) -> np.ndarray:
     # Invert the NDF distances: more negative -> higher score
     norm = normalize01(-ndf_dists)  # Negate the distances to invert the range
     return norm  # No need to invert again as we want negative to map to 1 and positive to 0
-
-def calc_pcd_bbox(pcd_points: np.ndarray) -> np.ndarray:
-    """Calculate the bounding box of the point cloud."""
-    min_corner = np.min(pcd_points, axis=0)
-    max_corner = np.max(pcd_points, axis=0)
-    return min_corner, max_corner
 
 def calculate_average_density(pcd_points: np.ndarray, bbox_min: np.ndarray, bbox_max: np.ndarray) -> float:
     """Calculate the average point density within the bounding box."""
