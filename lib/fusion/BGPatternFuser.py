@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from .config import BGPatternFuserConfig, FlatFusionMode
 from .helper import unfold_depth, drop_depth, ndfDrop_depth, calc_ground_depth
@@ -11,6 +12,7 @@ class BGPatternFuser:
     def __init__(self, config: BGPatternFuserConfig):
         self.config = config
         self.shape = None
+        os.makedirs(self.config.output_dir, exist_ok=True)
 
     def fuse_flat_ground(self, pose, rd_pc_scaled, bg_pcd_scaled):
         if self.shape is None:

@@ -15,8 +15,11 @@ def main():
 
     b = BGPatternDiffuser(cfg)
     
-    for p, metric_depth, color_img, idx, *_ in io.load():
-        b.diffuse(metric_depth, color_img, p, idx)
+    for dict in io.load():
+        b.diffuse(dict["metric_depth"], 
+                  dict["color_img"], 
+                  dict["pose"], 
+                  dict["idx"])
 
 if __name__ == '__main__':
     main()

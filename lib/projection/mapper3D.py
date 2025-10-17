@@ -8,21 +8,17 @@ from .helper import *
 from utils.o3dviz import mat_mesh, fit_camera
 from .config import *
 
-class Mapper3D:
-    def __init__(self, config: Mapper3DConfig, fuser = None):
-        assert config.color_mode in ['image', 'proximity', 'constant', 'none'], \
-            "color_mode must be 'image', 'proximity', 'constant', or 'none'"
-        self.config = config
+
+class O3DGUI:
+    def __init__(self, visMode):
         self.advance = threading.Event()
         self.scene_lock = threading.Lock()  
+        self.visMode = visMode;
         self.gui_thread = threading.Thread(target=self.do_gui, name="the-thread")
         self.gui_thread.start()
-        self.geomName = "points"
-        self.it = 0
-        self.fuser = fuser
 
     def do_gui(self):
-        if self.config.visMode == VisMode.Null:
+        if self.visMode == VisMode.Null:
             return  # No visualization, exit the method early
 
         gui.Application.instance.initialize()
@@ -55,6 +51,27 @@ class Mapper3D:
             gui.Application.instance.quit(); 
             return True
         return False
+
+
+class Evaluator3D(O3DGUI):
+    def __init__(self):
+        super().__init__()
+
+
+
+class Mapper3D(O3DGUI):
+    def __init__(self, config: Mapper3DConfig, fuser = None):
+        assert config.color_mode in ['image', 'proximity', 'constant', 'none'], \
+            "color_mode must be 'image', 'proximity', 'constant', or 'none'"
+        self.config = config
+        self.geomName = "points"
+        self.it = 0
+        self.projected_pcd = None
+        self.fuser = fuser
+        if (fuser is not None):
+            self.config.output_dir = fuser.config.output_dir
+        os.makedirs(self.config.output_dir, exist_ok=True)
+        super().__init__(self.config.visMode)
 
     def project(self, metric_depth, pose, cimg, bgpcd=None):
         """
@@ -99,6 +116,7 @@ class Mapper3D:
             name = f"points_{self.it}"
             mname = f"bgpcd_{self.it}"
             pcd = self.pcm2pcd(projected_pc, cimg)
+            self.projected_pcd = pcd
             self.scene.scene.add_geometry(name, pcd, self._mat_points(5.0))
             if bgpcd is not None:
                 self.scene.scene.add_geometry(mname, bgpcd, mat_mesh())
@@ -155,4 +173,14 @@ class Mapper3D:
         pcm_down = cv2.resize(pcm, (W_final, H_final), interpolation=cv2.INTER_AREA)
 
         return pcm_down
+    
+    def saveDepth(self, idx) -> np.ndarray:
+        filename = f"projected_{idx}.pcd"
+        path = os.path.join(self.config.output_dir, filename)
+        success = o3d.io.write_point_cloud(path, self.projected_pcd)
+        if success:
+            print(f"Projected point cloud saved successfully to: {path}")
+        else:
+            print(f"Failed to save point cloud to: {path}")
+
 

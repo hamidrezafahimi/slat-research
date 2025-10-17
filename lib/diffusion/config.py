@@ -7,7 +7,7 @@ class BGPatternDiffuserConfig:
     output_dir: str
     coarsetune_iters: int = 400
     finetune_iters: int = 800
-    viz: bool = True
+    viz: bool = False
     coarsetune_grid_w: int = 3
     coarsetune_grid_h: int = 3
     shift_k: float = 1.2
@@ -35,6 +35,6 @@ class BGPatternDiffuserConfig:
         allowed_verbosity = ["tiny", "none", "full"]
         if self.verbosity not in allowed_verbosity:
             raise ValueError(f"Invalid verbosity value: {self.verbosity}. Allowed values are {allowed_verbosity}.")
-        self.output_dir = os.path.join(self.output_dir, "bgpat")
+        self.output_dir = os.path.join(self.output_dir, "diffusion")
 
 

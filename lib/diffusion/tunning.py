@@ -189,9 +189,9 @@ class Optimizer:
                 ctrl = self.ctrl.copy()
                 self._ctrl_hist.append(self.ctrl)
             for i in range(self.N):
-                dJdZ = self.central_diff_grad(i)
+                dJdZ = self.central_diff_grad(i, ctrl)
                 step = self.lr * dJdZ
-                ctrl[i, 2] = float(self.ctrl[i, 2]) + step
+                ctrl[i, 2] = float(ctrl[i, 2]) + step
             score, _ = self.scorer.score(bspline_surface_mesh_from_ctrl(
                 ctrl, self.W, self.H, self.config.spline_mesh_samples_u, self.config.spline_mesh_samples_v))
             # update history window
@@ -217,6 +217,9 @@ class Optimizer:
                 print(text)
             else:
                 print(strike(text))
+
+        if self.ctrl is None:
+            self.ctrl = ctrl
         return self.ctrl[:, 2]
 
     def _should_stop(self):
@@ -275,16 +278,16 @@ class Optimizer:
         #     return True
         return ret, avg_rel_change, avg_rel_change_big
 
-    def central_diff_grad(self, i):
+    def central_diff_grad(self, i, _ctrl):
         """Compute central-difference gradient of score wrt ctrl[i,2]."""
         # +eps
-        ctrl_p = self.ctrl.copy()
+        ctrl_p = _ctrl.copy()
         ctrl_p[i, 2] += self.config.tunning_eps
         mesh_p = bspline_surface_mesh_from_ctrl(
             ctrl_p, self.W, self.H, self.config.spline_mesh_samples_u, self.config.spline_mesh_samples_v
         )
         Jp, _ = self.scorer.score(mesh_p)
-        ctrl_m = self.ctrl.copy()
+        ctrl_m = _ctrl.copy()
         ctrl_m[i, 2] -= self.config.tunning_eps
         mesh_m = bspline_surface_mesh_from_ctrl(
             ctrl_m, self.W, self.H, self.config.spline_mesh_samples_u, self.config.spline_mesh_samples_v
@@ -299,7 +302,7 @@ class Optimizer:
         if self.config.tunning_partialGrad:
             dJdZ = self.central_diff_partial_grad(i)
         else:
-            dJdZ = self.central_diff_grad(i)
+            dJdZ = self.central_diff_grad(i, self.ctrl)
         step = self.lr * dJdZ
         newz = oldz + step
         self.ctrl[i, 2] = newz
@@ -313,7 +316,7 @@ class Optimizer:
             if self.config.tunning_partialGrad:
                 dJdZ = self.central_diff_partial_grad(i)
             else:
-                dJdZ = self.central_diff_grad(i)
+                dJdZ = self.central_diff_grad(i, self.ctrl)
             self.ctrl[i, 2] = float(self.ctrl[i, 2]) + self.lr * dJdZ
             if self.config.verbosity == "full":
                 log_point_update(self.args, i, None, self.ctrl[i, 2], self.lr, dJdZ)

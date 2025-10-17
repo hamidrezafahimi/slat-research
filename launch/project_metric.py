@@ -13,11 +13,13 @@ def main():
 
     # Config
     cfg = Mapper3DConfig(color_mode='image',   # Options: 'image', 'proximity', 'constant', 'none'
-                         hfov_deg=io.cfg["hfov_deg"])
+                         hfov_deg=io.cfg["hfov_deg"],
+                         output_dir = io.getDataRootDir())
 
     if io.getDoFuse():
         fcfg = BGPatternFuserConfig(
-            hfov_deg=io.cfg["hfov_deg"]
+            hfov_deg=io.cfg["hfov_deg"],
+            output_dir = io.getDataRootDir()
         )
         f = BGPatternFuser(config=fcfg)
         mapper = Mapper3D(cfg, fuser=f)
@@ -25,15 +27,18 @@ def main():
         mapper = Mapper3D(cfg)
 
     # Main thread work (e.g., check advance flag and update point cloud)
-    for p, metric_depth, color_img, idx, bg in io.load():
+    for dict in io.load():
         # Wait until the flag is set
         mapper.advance.wait()
-        print(f"[info] projecting the new frame: {idx} ...")
+        print(f"[info] projecting the new frame: {dict['idx']} ...")
         # Generate a random point cloud and update the app
-        mapper.project(metric_depth, p, color_img, bg)
-        print(f"[info] projection done and scene updated for index {idx}.")
+        mapper.project(dict["metric_depth"], dict["pose"], dict["color_img"], 
+                       dict["bg"])
+        print(f"[info] projection done and scene updated for index {dict['idx']}.")
         # Reset the advance flag
         mapper.advance.clear()
+        if io.getDoSave():
+            mapper.saveDepth(dict['idx'])
 
 
 if __name__ == "__main__":
