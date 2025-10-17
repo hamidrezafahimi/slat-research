@@ -18,13 +18,21 @@ class VisMode(Enum):
 class Mapper3DConfig:
     hfov_deg: float
     output_dir: str
-    visMode: VisMode = VisMode.MAccum
+    visMode: VisMode = VisMode.MSingle
     shape: tuple = None
     color_mode: str = 'constant'  # 'image' | 'proximity' | 'constant' | 'none'
     mesh_u: int = 40
     mesh_v: int = 40
-    downsample_dstW: int = 5280
     scaling: Scaling = Scaling.MIN_Z
+    do_save: bool = None
+    on_video: bool = False
+    in_camera: bool = False
 
     def __post_init__(self):
         self.output_dir = os.path.join(self.output_dir, "rawdepth")
+
+        if self.on_video:
+            self.visMode = VisMode.MAccum
+
+        assert (int(self.on_video) + int(self.in_camera)) <= 1, \
+            "Not possible to project in camera frame (i.e. no rotation) while on video (i.e. with translation)"

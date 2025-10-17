@@ -10,6 +10,7 @@ import numpy as np
 import json
 from typing import Union
 from geom.types import Background
+import open3d as o3d
 
 
 def _find_config(dataset_dir: Path) -> Path:
@@ -36,6 +37,8 @@ class IOHandler:
         parser.add_argument("--start", type=int, help="Row index to start from")
         parser.add_argument("--save", action="store_true")
         parser.add_argument("--gt", action="store_true")
+        parser.add_argument("--on-video", action="store_true")
+        parser.add_argument("--in-camera", action="store_true")
         self.args = parser.parse_args()
 
         # Resolve the dataset path relative to the current working directory
@@ -71,8 +74,14 @@ class IOHandler:
     def getDoSave(self):
         return self.args.save
     
+    def getOnVideo(self):
+        return self.args.on_video
+    
     def getDataRootDir(self):
         return self.args.dataset
+    
+    def getInCamera(self):
+        return self.args.in_camera
     
     def load_row(self, row):
         if (self.cfg["kinematics"] == "CAM2NWU"):
@@ -248,8 +257,6 @@ def load_background(json_path: str) -> Background:
         T_inv=T_inv,
         metadata=metadata
     )
-
-import open3d as o3d
 
 def save_pcd(points: np.ndarray, colors: np.ndarray, filepath: str):
     """

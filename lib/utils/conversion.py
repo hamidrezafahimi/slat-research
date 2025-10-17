@@ -87,8 +87,20 @@ def pcd2pcm(pcd: o3d.geometry.PointCloud, H: int, W: int) -> np.ndarray:
     Returns:
         pcm (np.ndarray): Array of shape (H, W, 3) with color values in [0,1].
     """
-    # Extract colors
-    pts = np.asarray(pcd.colors, dtype=np.float32)
+    return pcdArr2pcm(pts = np.asarray(pcd.points, dtype=np.float32), H=H, W=W)
+
+def pcdArr2pcm(pts: ArrayLike, H: int, W: int) -> np.ndarray:
+    """
+    Convert a point cloud to an H x W x 3 numpy array.
+
+    Args:
+        pcd (o3d.geometry.PointCloud): Input point cloud.
+        H (int): Height of the output grid.
+        W (int): Width of the output grid.
+
+    Returns:
+        pcm (np.ndarray): Array of shape (H, W, 3) with color values in [0,1].
+    """
     if pts.shape[0] != H * W:
         raise ValueError(f"Point cloud has {pts.shape[0]} points, "
                          f"but expected {H*W} for reshaping.")

@@ -7,13 +7,14 @@ sys.path.append(dir_path + "/../../lib")
 from geom.surfaces import cg_centeric_xy_spline, bspline_surface_mesh_from_ctrl, \
     project_external_along_normals_noreject
 from projection.helper import project3D
-from utils.typeConversion import pcm2pcd, pcd2pcdArr, pcdArr2pcd
+from utils.conversion import pcm2pcd, pcd2pcdArr, pcdArr2pcd
 # from utils.o3dviz import visualize_spline_mesh
 from .tunning import Optimizer
 from .scoring import Projection3DScorer
 from .config import BGPatternDiffuserConfig
-from .helper import downsample_pcd, RandomSurfacer, compute_shifted_ctrl_points, \
+from .helper import RandomSurfacer, compute_shifted_ctrl_points, \
     create_grid_on_surface
+from geom.clouds import downsample_pcd
 from utils.o3dviz import visualize_spline_mesh
 import time
 from kinematics.clouds import orient_point_cloud_cgplane_global, apply_transform_points
@@ -170,7 +171,9 @@ class BGPatternDiffuser:
         # Main data log:
         restored = apply_transform_points(bgpts, T_inv)
         bg_pts = restored[bgmask]
-        save_pcd(restored, np.zeros_like(np.asarray(rd_pcd_.colors)), outname)
+        cs = np.zeros_like(np.asarray(rd_pcd_.colors))
+        cs[:,0] = 1
+        save_pcd(restored, cs, outname)
         # save_pcd(bg_pts, np.zeros_like(np.asarray(rd_pcd_.colors)), outname)
         save_pcd(np.asarray(rd_pcd_.points), np.asarray(rd_pcd_.colors), outname1)
         print(f"[BGPatternDiffuser] Fine tunning done on index {idx}, data written to {outname}. Time: {(time.time() - t0):.2f} sec")

@@ -2,17 +2,17 @@ import numpy as np
 import os, sys
 
 from kinematics.transformations import rotation_matrix_x
-from utils.typeConversion import pcm2pcd
+from utils.conversion import pcm2pcd
 dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(dir_path + "/..")
 from kinematics.pose import Pose
 import open3d as o3d
 
-import random
 from types import SimpleNamespace
 from scipy.interpolate import CubicSpline, LinearNDInterpolator
 from scipy.spatial import cKDTree
 _HAS_SCIPY = True
+import cv2
 
 def add_grid_and_axes(extent=50, step=1):
     """Return a grey XY-grid and XYZ axes for context."""
@@ -1375,7 +1375,7 @@ def calc_ground_depth(hfov_degs,
     depth_img     = np.minimum(depth_img, 255.0)                # clamp just in case
     return depth_img
 
-def ndfDrop_depth(dpc, bpcd, gpc):
+def NDFDrop_depth(dpc, bpcd, gpc):
     dpc_pcd = pcm2pcd(dpc)
     # bpc_pcd = pcm2pcd(bpc)
     bpc_pcd = bpcd
@@ -1519,3 +1519,101 @@ def map_pc_proj_to_index(pc_proj: np.ndarray, pc: np.ndarray, k: int = 3) -> np.
 
     # Reshape back to H_proj, W_proj
     return mapped_coords_flat.reshape(H_proj, W_proj, 2)
+
+def depyramidize_pointCloud(points: np.ndarray, eps: float = 1e-12):
+    """
+    Vectorized depyramidization for a whole point cloud.
+
+    For each point P:
+      - Intersect L(t) = t * P with plane z = plane_z → I (blue)
+        * If |Pz| > eps: t = plane_z / Pz ; I = t * P
+        * Else:
+            - If |plane_z| <= eps: I = (0,0,0)
+            - Else: I = (Px, Py, plane_z)     # lateral fallback
+      - point2plane  = ||P - I||
+      - plane2origin = ||I||                  # <— CHANGED from ||P||
+      - dep_point  = (Ix, Iy, plane_z + point2plane)
+      - dep_origin = (Ix, Iy, plane_z + plane2origin)  # <— CHANGED
+
+    Returns:
+      dep_points:  (N,3)
+      dep_origins: (N,3)
+      info: dict with:
+        - blue: (N,3) intersections I
+        - t: (N,) line parameters (NaN for fallback)
+        - valid_mask: (N,) bool where |Pz|>eps
+        - point2plane:  (N,)
+        - plane2origin: (N,)   # <— ADDED
+    """
+    P = np.asarray(points, dtype=np.float64)
+    plane_z = float(np.min(P[:, 2]))
+    assert P.ndim == 2 and P.shape[1] == 3, "points must be (N,3)"
+
+    N = P.shape[0]
+    Pz = P[:, 2]
+    valid_mask = np.abs(Pz) > eps
+
+    t = np.full((N,), np.nan, dtype=np.float64)
+    t[valid_mask] = plane_z / Pz[valid_mask]
+
+    I = np.empty_like(P)
+    I[valid_mask] = (t[valid_mask, None] * P[valid_mask])
+
+    inv_mask = ~valid_mask
+    if np.any(inv_mask):
+        I[inv_mask, :2] = P[inv_mask, :2]
+        if abs(plane_z) <= eps:
+            I[inv_mask] = 0.0  # origin
+        else:
+            I[inv_mask, 2] = plane_z
+
+    point2plane  = np.linalg.norm(P - I, axis=1)
+    plane2origin = np.linalg.norm(I, axis=1)  # <— CHANGED
+
+    dep_points = np.empty_like(P)
+    dep_origins = np.empty_like(P)
+
+    dep_points[:, 0:2] = I[:, 0:2]
+    dep_points[:, 2]   = plane_z + point2plane
+
+    dep_origins[:, 0:2] = I[:, 0:2]
+    dep_origins[:, 2]   = plane_z + plane2origin  # <— CHANGED
+
+    info = dict(
+        blue=I,
+        t=t,
+        valid_mask=valid_mask,
+        point2plane=point2plane,
+        plane2origin=plane2origin,   # <— ADDED
+    )
+    return dep_points, dep_origins, info
+
+def downsample_pcm(pcm: np.ndarray, W_final: int) -> np.ndarray:
+    """
+    Downsample a PCM (H, W, 3) numpy array to a target width, keeping aspect ratio.
+    
+    Args:
+        pcm (np.ndarray): Input PCM array of shape (H, W, 3)
+        W_final (int): Desired final width after downsampling
+        
+    Returns:
+        np.ndarray: Downsampled PCM array (H_new, W_final, 3)
+    """
+    # --- Validation ---
+    if not isinstance(pcm, np.ndarray):
+        raise TypeError("pcm must be a numpy array")
+    if pcm.ndim != 3 or pcm.shape[2] != 3:
+        raise ValueError("pcm must have shape (H, W, 3)")
+    if W_final <= 0:
+        raise ValueError("W_final must be a positive integer")
+
+    H, W, _ = pcm.shape
+
+    # --- Compute new size while keeping aspect ratio ---
+    ratio = W_final / W
+    H_final = int(H * ratio)
+
+    # --- Downsample using OpenCV with area interpolation ---
+    pcm_down = cv2.resize(pcm, (W_final, H_final), interpolation=cv2.INTER_AREA)
+
+    return pcm_down

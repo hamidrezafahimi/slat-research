@@ -6,7 +6,7 @@ dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(dir_path + "/../lib")
 from kinematics.pose import Point6, Pose
 from projection.helper import project3DAndScale
-from utils.typeConversion import pcm2pcd
+from utils.conversion import pcm2pcd
 from diffusion.helper import downsample_pcd
 
 import numpy as np

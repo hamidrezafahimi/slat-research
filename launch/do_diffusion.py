@@ -2,7 +2,7 @@ import os
 import sys
 dir_path = os.path.dirname(os.path.realpath(__file__))
 sys.path.append(dir_path + "/../lib")
-from diffusion.BGPatternDiffuser import BGPatternDiffuser, BGPatternDiffuserConfig
+from diffusion.diffusion import BGPatternDiffuser, BGPatternDiffuserConfig
 from utils.io import IOHandler
 
 def main():
