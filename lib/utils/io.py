@@ -34,6 +34,8 @@ class IOHandler:
         parser.add_argument("--do_fuse", action="store_true")
         parser.add_argument("--show_bg", action="store_true")
         parser.add_argument("--start", type=int, help="Row index to start from")
+        parser.add_argument("--save", action="store_true")
+        parser.add_argument("--gt", action="store_true")
         self.args = parser.parse_args()
 
         # Resolve the dataset path relative to the current working directory
@@ -54,7 +56,9 @@ class IOHandler:
         self.df = pd.read_csv(os.path.join(self.args.dataset, "data.csv"))
         self.rowslist = self.df.to_dict("records")
 
-        bgdir = os.path.join(dataset_dir, "bgpat")
+        bgdir = os.path.join(dataset_dir, "diffusion")
+        fuse_dir = os.path.join(dataset_dir, "fusion")
+        rawdepth_dir = os.path.join(dataset_dir, "rawdepth")
         use_bg = self.args.show_bg or self.args.do_fuse
         if read_mode and os.path.isdir(bgdir) and use_bg:
             self.bgDir = bgdir
@@ -63,6 +67,9 @@ class IOHandler:
 
     def getDoFuse(self):
         return self.args.do_fuse
+    
+    def getDoSave(self):
+        return self.args.save
     
     def getDataRootDir(self):
         return self.args.dataset
@@ -86,13 +93,20 @@ class IOHandler:
                         roll=row["phi"], pitch=row["theta"], yaw=row["psi"])
             p = Pose(p6=p6)
         
-        metric_depth_path = os.path.join(self.args.dataset, "metric_depth")
-        metric_depth_path = os.path.join(metric_depth_path, row["metric_depth"])
         color_path = os.path.join(self.args.dataset, "rgb")
         color_path = os.path.join(color_path, row["color_img"])
         
+        if(self.args.gt):
+            metric_depth_path = os.path.join(self.args.dataset, "gt")
+            row["metric_depth"] = row["metric_depth"][:-4] + ".npy"
+            metric_depth_path = os.path.join(metric_depth_path, row["metric_depth"])
+            metric_depth = np.load(metric_depth_path).astype(np.float32)
+        else:
+            metric_depth_path = os.path.join(self.args.dataset, "metric_depth")
+            metric_depth_path = os.path.join(metric_depth_path, row["metric_depth"])
+            metric_depth = np.loadtxt(metric_depth_path, delimiter=',', dtype=np.float32)
+
         # Load data
-        metric_depth = np.loadtxt(metric_depth_path, delimiter=',', dtype=np.float32)
         color_img = cv2.imread(color_path)
 
         if self.bgDir is not None:
@@ -100,7 +114,17 @@ class IOHandler:
             bg = load_pcd(d)
         else:
             bg = None
-        return p, metric_depth, color_img, bg
+        dic = {
+            "pose": p, 
+            "metric_depth": metric_depth, 
+            "color_img": color_img, 
+            "bg": bg,
+            # "fusion": fusion,
+            # "rawdepth": rawdepth,
+            # "gt": gt
+            "idx": row['index']
+        }
+        return dic
 
     def load(self):
         """
@@ -115,8 +139,8 @@ class IOHandler:
         """
         if self.args.index:
             row = self.df.loc[self.df["index"] == self.args.index].iloc[0]
-            p, metric_depth, color_img, bg = self.load_row(row) 
-            yield p, metric_depth, color_img, row['index'], bg
+            dic = self.load_row(row) 
+            yield dic
 
         else:
             if self.args.start:
@@ -127,9 +151,9 @@ class IOHandler:
                 k = 0
             while k < len(self.rowslist):
                 row = self.rowslist[k]   # row is a dict
-                p, metric_depth, color_img, bg = self.load_row(row) 
+                dic = self.load_row(row) 
                 k += 1
-                yield p, metric_depth, color_img, row['index'], bg
+                yield dic
 
 ArrayLike = Union[np.ndarray, list, tuple]
 
